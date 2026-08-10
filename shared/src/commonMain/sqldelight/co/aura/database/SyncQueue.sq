@@ -1,0 +1,17 @@
+CREATE TABLE sync_queue (
+    id TEXT NOT NULL PRIMARY KEY,
+    operation_type TEXT NOT NULL, -- 'CREATE_MSG', 'SAVE_MEM', 'DELETE_MEM'
+    payload TEXT NOT NULL, -- JSON Representation of data
+    created_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
+
+getPendingTasks:
+SELECT * FROM sync_queue ORDER BY created_at ASC;
+
+insertSyncTask:
+INSERT OR REPLACE INTO sync_queue (id, operation_type, payload, created_at, attempts)
+VALUES (?, ?, ?, ?, ?);
+
+deleteSyncTask:
+DELETE FROM sync_queue WHERE id = ?;

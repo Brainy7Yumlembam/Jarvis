@@ -1,0 +1,26 @@
+CREATE TABLE local_memory (
+    id TEXT NOT NULL PRIMARY KEY,
+    content TEXT NOT NULL,
+    embedding BLOB, -- Serialized float array for local Vector similarities
+    category TEXT NOT NULL, -- 'FACT', 'PREFERENCE', 'EVENT'
+    pinned INTEGER NOT NULL DEFAULT 0, -- 0 = false, 1 = true
+    importance INTEGER NOT NULL DEFAULT 5,
+    created_at INTEGER NOT NULL,
+    last_accessed_at INTEGER NOT NULL
+);
+
+getMemoryFragments:
+SELECT * FROM local_memory ORDER BY pinned DESC, last_accessed_at DESC;
+
+insertMemoryFragment:
+INSERT OR REPLACE INTO local_memory (id, content, embedding, category, pinned, importance, created_at, last_accessed_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+deleteMemoryFragment:
+DELETE FROM local_memory WHERE id = ?;
+
+updatePinnedStatus:
+UPDATE local_memory SET pinned = ? WHERE id = ?;
+
+updateLastAccessed:
+UPDATE local_memory SET last_accessed_at = ? WHERE id = ?;

@@ -1,0 +1,18 @@
+CREATE TABLE chat_message (
+    id TEXT NOT NULL PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    sender TEXT NOT NULL, -- 'USER', 'ASSISTANT', 'SYSTEM'
+    content TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    status TEXT NOT NULL -- 'PENDING', 'SENT', 'FAILED'
+);
+
+getMessages:
+SELECT * FROM chat_message ORDER BY timestamp DESC LIMIT :limit;
+
+insertMessage:
+INSERT OR REPLACE INTO chat_message (id, session_id, sender, content, timestamp, status)
+VALUES (?, ?, ?, ?, ?, ?);
+
+clearHistory:
+DELETE FROM chat_message;
