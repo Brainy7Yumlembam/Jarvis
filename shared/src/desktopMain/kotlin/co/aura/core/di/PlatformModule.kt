@@ -32,4 +32,18 @@ actual val platformModule = module {
     single<VoiceRecognizer> { DesktopSpeechRecognizer() }
     single<TextToSpeechEngine> { DesktopTTSEngine() }
     single<PermissionManager> { DesktopPermissionManager() }
+    single<co.aura.security.SecureStorage> { co.aura.security.DesktopSecureStorage() }
+    single<co.aura.actions.InstalledAppRegistry> {
+        object : co.aura.actions.InstalledAppRegistry {
+            override fun getInstalledApps(): List<co.aura.actions.InstalledApp> = emptyList()
+            override fun refreshRegistry() {}
+        }
+    }
+    single<co.aura.actions.AppAliasResolver> { co.aura.actions.AppAliasResolver() }
+    single<co.aura.communication.ContactResolver> {
+        object : co.aura.communication.ContactResolver {
+            override suspend fun resolveContact(name: String): List<co.aura.communication.ContactInfo> = emptyList()
+        }
+    }
+    single<co.aura.actions.ActionExecutor> { co.aura.actions.DesktopActionExecutor() }
 }

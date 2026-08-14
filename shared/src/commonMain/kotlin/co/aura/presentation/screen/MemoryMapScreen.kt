@@ -17,16 +17,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import co.aura.domain.model.MemoryFragment
 import co.aura.presentation.viewmodel.MemoryViewModel
-import org.koin.compose.koinInject
+import org.koin.compose.getKoin
+import androidx.lifecycle.viewmodel.compose.viewModel
 
 expect fun formatDate(timestamp: Long): String
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MemoryMapScreen(
-    onBack: () -> Unit,
-    viewModel: MemoryViewModel = koinInject()
+    onBack: () -> Unit
 ) {
+    val koin = getKoin()
+    val viewModel: MemoryViewModel = viewModel {
+        koin.get<MemoryViewModel>()
+    }
     val memories by viewModel.uiState.collectAsState()
 
     Scaffold(

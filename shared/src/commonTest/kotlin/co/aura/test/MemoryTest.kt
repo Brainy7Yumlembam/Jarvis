@@ -232,7 +232,8 @@ class MemoryTest {
             voiceRecognizer = voiceRecognizer,
             ttsEngine = ttsEngine,
             conversationManager = conversationManager,
-            permissionManager = FakePermissionManager()
+            permissionManager = FakePermissionManager(),
+            securityManager = FakeSecurityManager()
         )
 
         // Retrieve messages flow and verify restoration

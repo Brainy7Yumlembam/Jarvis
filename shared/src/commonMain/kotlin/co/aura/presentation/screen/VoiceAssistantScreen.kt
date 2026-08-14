@@ -6,6 +6,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -24,19 +27,29 @@ import androidx.compose.runtime.LaunchedEffect
 import co.aura.domain.model.ChatMessage
 import co.aura.domain.model.MessageSender
 
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+
 @Composable
 fun VoiceAssistantScreen(
     viewModel: VoiceAssistantViewModel,
     onRequestPermission: () -> Unit,
-    onNavigateToMemory: () -> Unit = {}
+    onNavigateToMemory: () -> Unit = {},
+    onNavigateToSettings: () -> Unit = {}
 ) {
-    val state by viewModel.uiState.collectAsState()
-    val messages by viewModel.messages.collectAsState(initial = emptyList())
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val messages by viewModel.messages.collectAsStateWithLifecycle(initialValue = emptyList())
     val listState = rememberLazyListState()
+
+    var hasScrolledInitially by remember { mutableStateOf(false) }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
+            if (!hasScrolledInitially) {
+                listState.scrollToItem(messages.size - 1)
+                hasScrolledInitially = true
+            } else {
+                listState.animateScrollToItem(messages.size - 1)
+            }
         }
     }
 
@@ -57,15 +70,23 @@ fun VoiceAssistantScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "A U R A",
+                    text = "J A R V I S",
                     style = MaterialTheme.typography.headlineMedium,
                     color = AuraPrimary
                 )
-                Button(
-                    onClick = onNavigateToMemory,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E2C4D))
-                ) {
-                    Text("Memories", color = Color.White)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = onNavigateToMemory,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E2C4D))
+                    ) {
+                        Text("Memories", color = Color.White)
+                    }
+                    Button(
+                        onClick = onNavigateToSettings,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E2C4D))
+                    ) {
+                        Text("Settings", color = Color.White)
+                    }
                 }
             }
 
@@ -86,7 +107,7 @@ fun VoiceAssistantScreen(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                "No active conversation turns yet.\nPress the microphone button to start talking to Aura.",
+                                "No active conversation turns yet.\nPress the microphone button to start talking to JARVIS.",
                                 color = Color.Gray,
                                 textAlign = TextAlign.Center,
                                 style = MaterialTheme.typography.bodyMedium
@@ -109,7 +130,7 @@ fun VoiceAssistantScreen(
                             ) {
                                 Column(modifier = Modifier.padding(12.dp)) {
                                     Text(
-                                        text = if (isUser) "You" else "Aura",
+                                        text = if (isUser) "You" else "JARVIS",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (isUser) AuraPrimary else Color.LightGray
                                     )
@@ -136,11 +157,12 @@ fun VoiceAssistantScreen(
             ) {
                 // Status indicator text
                 val statusText = when (state) {
-                    is VoiceAssistantState.Idle -> "Aura is idle"
+                    is VoiceAssistantState.Idle -> "JARVIS is idle"
                     is VoiceAssistantState.Listening -> "Listening..."
                     is VoiceAssistantState.Processing -> "Thinking..."
                     is VoiceAssistantState.Speaking -> "Speaking..."
                     is VoiceAssistantState.Error -> "System Alert"
+                    is VoiceAssistantState.Paused -> "Paused"
                 }
 
                 Row(
@@ -214,7 +236,7 @@ fun VoiceAssistantScreen(
                         )
                     ) {
                         Text(
-                            text = if (isListening) "Stop Mic" else "Talk to Aura",
+                            text = if (isListening) "Stop Mic" else "Talk to JARVIS",
                             color = Color.Black
                         )
                     }

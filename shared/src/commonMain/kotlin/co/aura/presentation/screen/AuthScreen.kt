@@ -15,7 +15,7 @@ fun AuthScreen(onLoginSuccess: () -> Unit) {
         contentAlignment = Alignment.Center
     ) {
         Button(onClick = onLoginSuccess) {
-            Text(text = "Initialize Aura Connection")
+            Text(text = "Initialize JARVIS Connection")
         }
     }
 }

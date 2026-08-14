@@ -11,7 +11,7 @@ fun main() = application {
     
     Window(
         onCloseRequest = ::exitApplication,
-        title = "Aura Assistant"
+        title = "JARVIS Assistant"
     ) {
         App()
     }

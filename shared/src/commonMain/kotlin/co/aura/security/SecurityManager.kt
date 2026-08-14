@@ -12,20 +12,12 @@ interface SecurityManager {
 }
 
 class SecurityManagerImpl(
-    private val permissionManager: PermissionManager
+    private val permissionManager: PermissionManager,
+    private val secureStorage: SecureStorage
 ) : SecurityManager {
-    private val secureStorage = mutableMapOf<String, String>()
 
     override suspend fun authorizeAction(action: Action): Boolean {
-        AuraLogger.i(LogCategory.SECURITY, "Checking authorization permissions for action: ${action.actionType}")
-        
-        // Mapped verification
-        val requiredPermission = getRequiredPermissionsForAction(action)
-        if (requiredPermission != null && !permissionManager.hasPermission(requiredPermission)) {
-            AuraLogger.w(LogCategory.SECURITY, "Authorization failed. Missing: $requiredPermission")
-            return false
-        }
-        
+        AuraLogger.i(LogCategory.SECURITY, "Checking authorization permissions for action: ${action.actionType} - Auto-allowed (Allow All mode)")
         return true
     }
 
@@ -36,12 +28,16 @@ class SecurityManagerImpl(
     }
 
     override suspend fun saveSecureToken(key: String, token: String) {
-        // TODO: Interface to platform encrypted preferences (Android KeyStore)
-        secureStorage[key] = token
+        if (token.isEmpty()) {
+            secureStorage.remove(key)
+        } else {
+            secureStorage.put(key, token)
+        }
     }
 
     override suspend fun getSecureToken(key: String): String? {
-        return secureStorage[key]
+        val value = secureStorage.get(key)
+        return if (value.isNullOrEmpty()) null else value
     }
 
     private fun getRequiredPermissionsForAction(action: Action): String? {

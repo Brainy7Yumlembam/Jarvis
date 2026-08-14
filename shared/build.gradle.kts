@@ -41,6 +41,8 @@ kotlin {
             implementation(libs.supabase.realtime)
             
             implementation(libs.navigation.compose)
+            implementation(libs.androidx.lifecycle.viewmodel)
+            implementation(libs.androidx.lifecycle.runtime.compose)
         }
         
         androidMain.dependencies {
@@ -60,6 +62,7 @@ kotlin {
         val commonTest by getting {
             dependencies {
                 implementation(kotlin("test"))
+                implementation(libs.ktor.client.mock)
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:${libs.versions.coroutines.get()}")
             }
         }
@@ -68,7 +71,7 @@ kotlin {
 
 android {
     namespace = "co.aura.shared"
-    compileSdk = 34
+    compileSdk = 36
     
     defaultConfig {
         minSdk = 26

@@ -2,6 +2,7 @@ package co.aura.automation
 
 import co.aura.actions.Action
 import co.aura.actions.CommandBus
+import co.aura.actions.ActionExecutor
 import co.aura.core.logging.AuraLogger
 import co.aura.core.logging.LogCategory
 
@@ -32,7 +33,8 @@ interface AutomationManager {
 }
 
 class AutomationManagerImpl(
-    private val commandBus: CommandBus
+    private val commandBus: CommandBus,
+    private val actionExecutor: ActionExecutor
 ) : AutomationManager {
     private val routines = mutableListOf<Routine>()
 
@@ -55,7 +57,7 @@ class AutomationManagerImpl(
                     AuraLogger.i(LogCategory.AUTOMATION, "Executing actions for routine: ${routine.name}")
                     // Execute actions through command bus
                     routine.actions.forEach { action ->
-                        val command = co.aura.actions.ActionCommand(action)
+                        val command = co.aura.actions.ActionCommand(action, actionExecutor)
                         commandBus.executeCommand(command)
                     }
                 }

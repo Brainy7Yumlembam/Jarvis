@@ -40,10 +40,10 @@ class AuraTest {
             contextBuilder = co.aura.conversation.ContextBuilderImpl()
         )
 
-        val response = manager.processUserMessage("Hello Aura")
+        val response = manager.processUserMessage("Hello JARVIS")
         assertEquals("Mock response from fake LLM provider", response)
         assertEquals(2, repository.messages.size)
-        assertEquals("Hello Aura", repository.messages[0].content)
+        assertEquals("Hello JARVIS", repository.messages[0].content)
         assertEquals("Mock response from fake LLM provider", repository.messages[1].content)
     }
 
@@ -69,7 +69,8 @@ class AuraTest {
             voiceRecognizer = voiceRecognizer,
             ttsEngine = ttsEngine,
             conversationManager = conversationManager,
-            permissionManager = permissionManager
+            permissionManager = permissionManager,
+            securityManager = FakeSecurityManager()
         )
 
         assertEquals(VoiceAssistantState.Idle, viewModel.uiState.value)
@@ -110,7 +111,8 @@ class AuraTest {
             voiceRecognizer = voiceRecognizer,
             ttsEngine = ttsEngine,
             conversationManager = conversationManager,
-            permissionManager = permissionManager
+            permissionManager = permissionManager,
+            securityManager = FakeSecurityManager()
         )
 
         viewModel.startListening()
@@ -143,7 +145,8 @@ class AuraTest {
             voiceRecognizer = voiceRecognizer,
             ttsEngine = ttsEngine,
             conversationManager = conversationManager,
-            permissionManager = permissionManager
+            permissionManager = permissionManager,
+            securityManager = FakeSecurityManager()
         )
 
         viewModel.startListening()
@@ -156,5 +159,57 @@ class AuraTest {
 
         assertTrue(viewModel.uiState.value is VoiceAssistantState.Error)
         assertEquals("Gemini API Rate limit exceeded.", (viewModel.uiState.value as VoiceAssistantState.Error).errorMessage)
+    }
+
+    @Test
+    fun testVoiceAssistantViewModelContinuousConversationFlow() = runTest {
+        val voiceRecognizer = FakeVoiceRecognizer()
+        val ttsEngine = FakeTextToSpeechEngine()
+        val aiProvider = FakeAIProvider()
+        val memoryManager = FakeMemoryManager()
+        val personalityEngine = PersonalityEngineImpl()
+        val repository = FakeConversationRepository()
+        val permissionManager = FakePermissionManager()
+        
+        // Scenario 1: Continuous Conversation Disabled (default)
+        val securityManager = FakeSecurityManager()
+        val conversationManager = ConversationManagerImpl(
+            aiProvider = aiProvider,
+            memoryManager = memoryManager,
+            personalityEngine = personalityEngine,
+            conversationRepository = repository,
+            contextBuilder = co.aura.conversation.ContextBuilderImpl()
+        )
+
+        val viewModel = VoiceAssistantViewModel(
+            voiceRecognizer = voiceRecognizer,
+            ttsEngine = ttsEngine,
+            conversationManager = conversationManager,
+            permissionManager = permissionManager,
+            securityManager = securityManager
+        )
+
+        viewModel.startListening()
+        testScheduler.runCurrent()
+        voiceRecognizer.emitTranscript("Hi")
+        testScheduler.runCurrent()
+        voiceRecognizer.completeListening()
+        testScheduler.advanceUntilIdle()
+
+        // Should be Idle after speaking finishes
+        assertEquals(VoiceAssistantState.Idle, viewModel.uiState.value)
+
+        // Scenario 2: Continuous Conversation Enabled
+        securityManager.saveSecureToken("continuous_conversation", "true")
+        
+        viewModel.startListening()
+        testScheduler.runCurrent()
+        voiceRecognizer.emitTranscript("Hi")
+        testScheduler.runCurrent()
+        voiceRecognizer.completeListening()
+        testScheduler.advanceUntilIdle()
+
+        // Should return to Listening state immediately
+        assertTrue(viewModel.uiState.value is VoiceAssistantState.Listening)
     }
 }

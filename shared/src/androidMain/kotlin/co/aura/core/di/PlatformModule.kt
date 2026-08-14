@@ -20,6 +20,11 @@ actual val platformModule = module {
         )
     }
     single<VoiceRecognizer> { AndroidSpeechRecognizer(get()) }
-    single<TextToSpeechEngine> { AndroidTTSEngine(get()) }
+    single<TextToSpeechEngine> { AndroidTTSEngine(get(), get()) }
     single<PermissionManager> { AndroidPermissionManager(get()) }
+    single<co.aura.security.SecureStorage> { co.aura.security.AndroidSecureStorage(get()) }
+    single<co.aura.actions.InstalledAppRegistry> { co.aura.actions.AndroidInstalledAppRegistry(get()) }
+    single<co.aura.actions.AppAliasResolver> { co.aura.actions.AppAliasResolver() }
+    single<co.aura.communication.ContactResolver> { co.aura.communication.AndroidContactResolver(get()) }
+    single<co.aura.actions.ActionExecutor> { co.aura.actions.AndroidActionExecutor(get(), get(), get(), get(), get()) }
 }

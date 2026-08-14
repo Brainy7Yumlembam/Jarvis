@@ -15,7 +15,6 @@ class AndroidPermissionManager(
     }
 
     override fun requestPermission(permission: String): Flow<Boolean> = flow {
-        // Request launcher flow callback is triggered from presentation layer
         emit(hasPermission(permission))
     }
 }

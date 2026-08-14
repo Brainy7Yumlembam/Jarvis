@@ -25,6 +25,6 @@ fun SplashScreen(onNavigateToDashboard: () -> Unit) {
             delay(1500)
             onNavigateToDashboard()
         }
-        Text(text = "A U R A", color = AuraPrimary)
+        Text(text = "J A R V I S", color = AuraPrimary)
     }
 }

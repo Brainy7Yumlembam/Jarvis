@@ -15,12 +15,12 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.consumeAsFlow
 
-class FakeAIProvider : AIProvider {
+open class FakeAIProvider : AIProvider {
     var responseToReturn = "Mock response from fake LLM provider"
     var shouldThrowError = false
     var errorToThrow: Exception = Exception("Network request failed")
 
-    override suspend fun generateResponse(prompt: String): String {
+    open override suspend fun generateResponse(prompt: String): String {
         if (shouldThrowError) throw errorToThrow
         return responseToReturn
     }
@@ -35,11 +35,16 @@ class FakeAIProvider : AIProvider {
 }
 
 class FakeVoiceRecognizer : VoiceRecognizer {
-    private val channel = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    private var channel = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     var stopListeningCalled = false
     var cancelCalled = false
 
-    override fun startListening(): Flow<String> = channel.consumeAsFlow()
+    override fun startListening(): Flow<String> {
+        if (channel.isClosedForSend) {
+            channel = kotlinx.coroutines.channels.Channel(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        }
+        return channel.consumeAsFlow()
+    }
 
     fun emitTranscript(text: String) {
         channel.trySend(text)
@@ -91,7 +96,9 @@ class FakePermissionManager : PermissionManager {
 
 class FakeConversationRepository : ConversationRepository {
     val messages = mutableListOf<ChatMessage>()
-    override fun getMessages(limit: Int): Flow<List<ChatMessage>> = flow { emit(messages) }
+    override fun getMessages(limit: Int): Flow<List<ChatMessage>> = flow {
+        emit(messages.sortedByDescending { it.timestamp }.take(limit))
+    }
     override suspend fun saveMessage(message: ChatMessage) { messages.add(message) }
     override suspend fun clearHistory() { messages.clear() }
 }
@@ -186,4 +193,17 @@ class FakeMemoryRepository : MemoryRepository {
     override suspend fun updateSemanticProfile(profile: co.aura.domain.model.UserProfile) {
         semanticProfile = profile
     }
+}
+
+class FakeSecurityManager : co.aura.security.SecurityManager {
+    private val storage = mutableMapOf<String, String>()
+
+    override suspend fun authorizeAction(action: co.aura.actions.Action): Boolean = true
+    override suspend fun confirmSensitiveAction(action: co.aura.actions.Action, promptMessage: String): Boolean = true
+
+    override suspend fun saveSecureToken(key: String, token: String) {
+        if (token.isEmpty()) storage.remove(key) else storage[key] = token
+    }
+
+    override suspend fun getSecureToken(key: String): String? = storage[key]
 }

@@ -8,13 +8,17 @@ import co.aura.presentation.navigation.Routes
 import co.aura.presentation.screen.*
 import co.aura.presentation.theme.AuraTheme
 import co.aura.presentation.viewmodel.VoiceAssistantViewModel
-import org.koin.compose.koinInject
+import org.koin.compose.getKoin
+import androidx.lifecycle.viewmodel.compose.viewModel
 
 @Composable
 fun App(onRequestAudioPermission: () -> Unit = {}) {
     AuraTheme {
         val navController = rememberNavController()
-        val voiceViewModel = koinInject<VoiceAssistantViewModel>()
+        val koin = getKoin()
+        val voiceViewModel: VoiceAssistantViewModel = viewModel {
+            koin.get<VoiceAssistantViewModel>()
+        }
 
         NavHost(
             navController = navController,
@@ -44,6 +48,9 @@ fun App(onRequestAudioPermission: () -> Unit = {}) {
                     onRequestPermission = onRequestAudioPermission,
                     onNavigateToMemory = {
                         navController.navigate(Routes.MEMORY_MAP)
+                    },
+                    onNavigateToSettings = {
+                        navController.navigate(Routes.SETTINGS)
                     }
                 )
             }
@@ -58,6 +65,9 @@ fun App(onRequestAudioPermission: () -> Unit = {}) {
                 SettingsScreen(
                     onBack = {
                         navController.popBackStack()
+                    },
+                    onNavigateToMemory = {
+                        navController.navigate(Routes.MEMORY_MAP)
                     }
                 )
             }

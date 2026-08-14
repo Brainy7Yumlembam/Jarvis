@@ -39,21 +39,25 @@ val commonModule = module {
     single<SyncRepository> { SyncRepositoryImpl(get()) }
     
     // AI Providers
-    single { GeminiModelConfig("gemini-1.5-flash") }
-    single<AIProvider> { GeminiProvider(get(), get(), get(), get()) }
+    single { GeminiCredentialManager(get()) }
+    single { GeminiModelConfig("gemini-3.6-flash") }
+    single { GeminiProvider(get(), get(), get<GeminiCredentialManager>(), get()) }
+    single { LocalAIProvider(get()) }
+    single<AIProvider> { DelegatingAIProvider(get(), get(), get()) }
     
     // Action / Command Bus Architecture
     single<CommandBus> { CommandBusImpl() }
     single<ActionParser> { ActionParserImpl(get()) }
     single<ActionValidator> { ActionValidatorImpl() }
-    single<ActionRouter> { ActionRouterImpl(get()) }
+    single<ActionRouter> { ActionRouterImpl(get(), get()) }
     
     // Cognitive Managers
     single<MemoryRetriever> { KeywordMemoryRetriever(get()) }
     single<ContextBuilder> { ContextBuilderImpl() }
     single<MemoryManager> { MemoryManagerImpl(get(), get(), get()) }
     single<PersonalityEngine> { PersonalityEngineImpl() }
-    single<ConversationManager> { ConversationManagerImpl(get(), get(), get(), get(), get()) }
+    single<co.aura.voice.SpeechCommandNormalizer> { co.aura.voice.SpeechCommandNormalizer() }
+    single<ConversationManager> { ConversationManagerImpl(get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), getOrNull(), getOrNull()) }
     
     // Extension Systems
     single<PluginManager> { PluginManagerImpl().apply {
@@ -69,10 +73,10 @@ val commonModule = module {
         registerPlugin(NotificationPlugin())
         registerPlugin(AlarmPlugin())
     }}
-    single<AutomationManager> { AutomationManagerImpl(get()) }
+    single<AutomationManager> { AutomationManagerImpl(get(), get()) }
     
     // Security Framework
-    single<SecurityManager> { SecurityManagerImpl(get()) }
+    single<SecurityManager> { SecurityManagerImpl(get(), get()) }
     
     // Sync Utilities
     single<SyncEngine> { SyncEngineImpl(get()) }
@@ -81,9 +85,9 @@ val commonModule = module {
     single<SystemControlProvider> { SystemControlProviderImpl() }
     single<VisualIntelligenceProvider> { VisualIntelligenceProviderImpl() }
     
-    // ViewModels
-    factory { VoiceAssistantViewModel(get(), get(), get(), get()) }
+    factory { VoiceAssistantViewModel(get(), get(), get(), get(), get()) }
     factory { co.aura.presentation.viewmodel.MemoryViewModel(get()) }
+    factory { co.aura.presentation.viewmodel.SettingsViewModel(get(), get(), get()) }
 }
 
 fun initKoin(appDeclaration: KoinAppDeclaration = {}) = startKoin {

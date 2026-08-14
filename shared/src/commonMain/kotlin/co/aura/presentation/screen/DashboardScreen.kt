@@ -16,7 +16,7 @@ fun DashboardScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Aura Dashboard") },
+                title = { Text("JARVIS Dashboard") },
                 actions = {
                     IconButton(onClick = onNavigateToMemory) {
                         Text("🧠")
@@ -36,7 +36,7 @@ fun DashboardScreen(
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    text = "Aura Active",
+                    text = "JARVIS Active",
                     style = MaterialTheme.typography.headlineMedium
                 )
                 Spacer(modifier = Modifier.height(16.dp))

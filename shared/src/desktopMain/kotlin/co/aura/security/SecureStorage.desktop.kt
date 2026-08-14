@@ -1,0 +1,19 @@
+package co.aura.security
+
+import java.util.prefs.Preferences
+
+class DesktopSecureStorage : SecureStorage {
+    private val prefs = Preferences.userRoot().node("co.aura.jarvis")
+
+    override fun put(key: String, value: String) {
+        prefs.put(key, value)
+    }
+
+    override fun get(key: String): String? {
+        return prefs.get(key, null)
+    }
+
+    override fun remove(key: String) {
+        prefs.remove(key)
+    }
+}
