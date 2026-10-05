@@ -35,9 +35,17 @@ open class FakeAIProvider : AIProvider {
 }
 
 class FakeVoiceRecognizer : VoiceRecognizer {
+    private var eventChannel = kotlinx.coroutines.channels.Channel<co.aura.voice.RecognitionEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     private var channel = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     var stopListeningCalled = false
     var cancelCalled = false
+
+    override fun startListeningEvents(): Flow<co.aura.voice.RecognitionEvent> {
+        if (eventChannel.isClosedForSend) {
+            eventChannel = kotlinx.coroutines.channels.Channel(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        }
+        return eventChannel.consumeAsFlow()
+    }
 
     override fun startListening(): Flow<String> {
         if (channel.isClosedForSend) {
@@ -47,10 +55,17 @@ class FakeVoiceRecognizer : VoiceRecognizer {
     }
 
     fun emitTranscript(text: String) {
+        eventChannel.trySend(co.aura.voice.RecognitionEvent.PartialResult(text))
+        channel.trySend(text)
+    }
+
+    fun emitFinalResult(text: String) {
+        eventChannel.trySend(co.aura.voice.RecognitionEvent.FinalResult(text))
         channel.trySend(text)
     }
 
     fun completeListening() {
+        eventChannel.close()
         channel.close()
     }
 
@@ -62,6 +77,29 @@ class FakeVoiceRecognizer : VoiceRecognizer {
         cancelCalled = true
     }
 }
+
+class FakeInterruptionMonitor : co.aura.voice.InterruptionMonitor {
+    var isMonitoringCalled = false
+    override var isMonitoring: Boolean = false
+    override var isSupportedOnPlatform: Boolean = true
+    var onInterruptionCallback: ((String) -> Unit)? = null
+
+    override fun startMonitoring(currentSpeakingText: String, onInterruption: (phrase: String) -> Unit) {
+        isMonitoringCalled = true
+        isMonitoring = true
+        onInterruptionCallback = onInterruption
+    }
+
+    override fun stopMonitoring() {
+        isMonitoring = false
+        onInterruptionCallback = null
+    }
+
+    fun simulateInterruption(phrase: String = "stop") {
+        onInterruptionCallback?.invoke(phrase)
+    }
+}
+
 
 class FakeTextToSpeechEngine : TextToSpeechEngine {
     var textSpoken: String? = null
@@ -101,6 +139,30 @@ class FakeConversationRepository : ConversationRepository {
     }
     override suspend fun saveMessage(message: ChatMessage) { messages.add(message) }
     override suspend fun clearHistory() { messages.clear() }
+}
+
+class FakeConversationSummaryRepository : co.aura.domain.repository.ConversationSummaryRepository {
+    var savedSummary: String? = null
+    var lastMessageId: String? = null
+
+    override suspend fun getSummary(sessionId: String): String? = savedSummary
+    override suspend fun saveSummary(sessionId: String, summary: String, lastMessageId: String?) {
+        this.savedSummary = summary
+        this.lastMessageId = lastMessageId
+    }
+    override suspend fun clearSummary(sessionId: String) {
+        savedSummary = null
+        lastMessageId = null
+    }
+}
+
+class FakeMemoryExtractor(private val memoryManager: MemoryManager) : co.aura.memory.MemoryExtractor {
+    override suspend fun extractAndSaveAsync(userMessage: String, assistantResponse: String): Boolean {
+        if (userMessage.startsWith("I prefer ") || userMessage.startsWith("My name is ") || userMessage.contains("building JARVIS")) {
+            return memoryManager.storeMemory(userMessage, "PREFERENCE", 5)
+        }
+        return false
+    }
 }
 
 class FakeMemoryManager : MemoryManager {

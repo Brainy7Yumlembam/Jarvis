@@ -17,9 +17,7 @@ abstract class BaseViewModel<State, Event>(initialState: State) : ViewModel() {
 
     abstract fun onEvent(event: Event)
     
-    protected fun launchInScope(block: suspend () -> Unit): kotlinx.coroutines.Job {
-        return viewModelScope.launch {
-            block()
-        }
+    protected fun launchInScope(block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit): kotlinx.coroutines.Job {
+        return viewModelScope.launch(block = block)
     }
 }

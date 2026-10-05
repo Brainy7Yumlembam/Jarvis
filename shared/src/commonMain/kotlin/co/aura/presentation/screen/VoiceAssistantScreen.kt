@@ -1,34 +1,67 @@
 package co.aura.presentation.screen
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import co.aura.presentation.theme.AuraBackgroundDark
-import co.aura.presentation.theme.AuraPrimary
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import co.aura.presentation.component.JarvisCore
+import co.aura.presentation.component.SubtitlePanel
+import co.aura.presentation.theme.JarvisBackground
+import co.aura.presentation.theme.JarvisGlow
+import co.aura.presentation.theme.JarvisHologram
+import co.aura.presentation.theme.JarvisOrangeBright
+import co.aura.presentation.theme.JarvisOrangeCore
+import co.aura.presentation.theme.JarvisOrangeDark
+import co.aura.presentation.theme.JarvisOrangeDeep
+import co.aura.presentation.theme.JarvisOrangeLight
+import co.aura.presentation.theme.JarvisSurfaceDark
 import co.aura.presentation.viewmodel.VoiceAssistantState
 import co.aura.presentation.viewmodel.VoiceAssistantViewModel
 
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.runtime.LaunchedEffect
-import co.aura.domain.model.ChatMessage
-import co.aura.domain.model.MessageSender
-
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-
+/**
+ * Cinematic 3D Holographic AI Core Interface for JARVIS.
+ *
+ * Designed with a strict minimalist aesthetic:
+ * - 90% visual AI core floating in deep space
+ * - Zero text-heavy HUD, zero diagnostic dashboard readouts
+ * - No permanent text buttons; subtle icon-only controls
+ * - Real-time holographic subtitle display at the bottom
+ * - Directly interactive 3D neural brain core
+ */
 @Composable
 fun VoiceAssistantScreen(
     viewModel: VoiceAssistantViewModel,
@@ -37,216 +70,325 @@ fun VoiceAssistantScreen(
     onNavigateToSettings: () -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val messages by viewModel.messages.collectAsStateWithLifecycle(initialValue = emptyList())
-    val listState = rememberLazyListState()
+    val visualizerState by viewModel.visualizerState.collectAsStateWithLifecycle()
+    val subtitleState by viewModel.subtitleState.collectAsStateWithLifecycle()
 
-    var hasScrolledInitially by remember { mutableStateOf(false) }
-
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            if (!hasScrolledInitially) {
-                listState.scrollToItem(messages.size - 1)
-                hasScrolledInitially = true
-            } else {
-                listState.animateScrollToItem(messages.size - 1)
-            }
-        }
-    }
+    // Optional transcript overlay, hidden by default for cinematic immersion
+    var showTranscriptOverlay by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(AuraBackgroundDark)
-            .padding(16.dp)
+            .background(JarvisBackground)
     ) {
+        // ── Deep Space Atmospheric Canvas ───────────────────────────
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val center = Offset(w / 2f, h / 2f)
+
+            // Deep space core glow
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        JarvisGlow.copy(alpha = 0.08f),
+                        JarvisOrangeDeep.copy(alpha = 0.03f),
+                        Color.Transparent
+                    ),
+                    center = center,
+                    radius = w * 0.70f
+                ),
+                radius = w * 0.70f,
+                center = center
+            )
+
+            // Minimalist hairline technical corner reticles
+            val crossSize = 10f
+            val margin = 24f
+            val reticleColor = JarvisHologram.copy(alpha = 0.18f)
+
+            // Top-left
+            drawLine(reticleColor, Offset(margin - crossSize, margin), Offset(margin + crossSize, margin), 1f)
+            drawLine(reticleColor, Offset(margin, margin - crossSize), Offset(margin, margin + crossSize), 1f)
+
+            // Top-right
+            drawLine(reticleColor, Offset(w - margin - crossSize, margin), Offset(w - margin + crossSize, margin), 1f)
+            drawLine(reticleColor, Offset(w - margin, margin - crossSize), Offset(w - margin, margin + crossSize), 1f)
+
+            // Bottom-left
+            drawLine(reticleColor, Offset(margin - crossSize, h - margin), Offset(margin + crossSize, h - margin), 1f)
+            drawLine(reticleColor, Offset(margin, h - margin - crossSize), Offset(margin, h - margin + crossSize), 1f)
+
+            // Bottom-right
+            drawLine(reticleColor, Offset(w - margin - crossSize, h - margin), Offset(w - margin + crossSize, h - margin), 1f)
+            drawLine(reticleColor, Offset(w - margin, h - margin - crossSize), Offset(w - margin, h - margin + crossSize), 1f)
+        }
+
+        // ── Main UI Layout ──────────────────────────────────────────
         Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.SpaceBetween
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 20.dp, vertical = 20.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Header
+            // ── Top Navigation Bar: Minimal Icon-Only Holographic Controls ─
             Row(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "J A R V I S",
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = AuraPrimary
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = onNavigateToMemory,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E2C4D))
-                    ) {
-                        Text("Memories", color = Color.White)
+                // Left Icon: Memory Map Navigation (Constellation Glyph)
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .background(JarvisSurfaceDark.copy(alpha = 0.50f), CircleShape)
+                        .border(0.8.dp, JarvisHologram.copy(alpha = 0.30f), CircleShape)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onNavigateToMemory
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.size(18.dp)) {
+                        val c = Offset(size.width / 2f, size.height / 2f)
+                        val p1 = Offset(c.x - 5f, c.y - 4f)
+                        val p2 = Offset(c.x + 5f, c.y - 2f)
+                        val p3 = Offset(c.x, c.y + 5f)
+
+                        drawLine(JarvisHologram.copy(alpha = 0.7f), p1, p2, 1.2f)
+                        drawLine(JarvisHologram.copy(alpha = 0.7f), p2, p3, 1.2f)
+                        drawLine(JarvisHologram.copy(alpha = 0.7f), p3, p1, 1.2f)
+
+                        drawCircle(JarvisOrangeBright, 2f, p1)
+                        drawCircle(JarvisOrangeBright, 2.4f, p2)
+                        drawCircle(JarvisOrangeLight, 2f, p3)
                     }
-                    Button(
-                        onClick = onNavigateToSettings,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E2C4D))
-                    ) {
-                        Text("Settings", color = Color.White)
+                }
+
+                // Center Title: J.A.R.V.I.S.
+                Text(
+                    text = "J.A.R.V.I.S.",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        letterSpacing = 6.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 15.sp
+                    ),
+                    color = JarvisOrangeBright,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { showTranscriptOverlay = !showTranscriptOverlay }
+                    )
+                )
+
+                // Right Icon: Settings Navigation (Technical Cog Glyph)
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .background(JarvisSurfaceDark.copy(alpha = 0.50f), CircleShape)
+                        .border(0.8.dp, JarvisHologram.copy(alpha = 0.30f), CircleShape)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onNavigateToSettings
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.size(18.dp)) {
+                        val c = Offset(size.width / 2f, size.height / 2f)
+                        drawCircle(JarvisHologram.copy(alpha = 0.8f), 6f, c, style = Stroke(1.4f))
+                        drawCircle(JarvisOrangeBright, 2f, c)
+
+                        // 4 technical notches
+                        drawLine(JarvisHologram.copy(alpha = 0.8f), Offset(c.x - 8f, c.y), Offset(c.x - 6f, c.y), 1.5f)
+                        drawLine(JarvisHologram.copy(alpha = 0.8f), Offset(c.x + 6f, c.y), Offset(c.x + 8f, c.y), 1.5f)
+                        drawLine(JarvisHologram.copy(alpha = 0.8f), Offset(c.x, c.y - 8f), Offset(c.x, c.y - 6f), 1.5f)
+                        drawLine(JarvisHologram.copy(alpha = 0.8f), Offset(c.x, c.y + 6f), Offset(c.x, c.y + 8f), 1.5f)
                     }
                 }
             }
 
-            // Scrollable Conversation History
-            LazyColumn(
-                state = listState,
+            // ── Center: 3D Volumetric Neural AI Core ────────────────────
+            Box(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
-                    .background(Color(0xFF161525), shape = RoundedCornerShape(8.dp))
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center
             ) {
-                if (messages.isEmpty()) {
-                    item {
+                JarvisCore(
+                    voiceState = state,
+                    speechAmplitude = visualizerState.speechAmplitude,
+                    coreSize = 600.dp,
+                    onCoreClick = {
+                        when (val s = state) {
+                            is VoiceAssistantState.Speaking -> {
+                                // Tap core to immediately interrupt speech & listen
+                                viewModel.interruptJarvis()
+                            }
+                            is VoiceAssistantState.Listening -> {
+                                if (s.partialTranscript.isNotBlank()) {
+                                    viewModel.finishUserSpeech(s.partialTranscript)
+                                } else {
+                                    viewModel.cancelListening()
+                                }
+                            }
+                            is VoiceAssistantState.Idle, is VoiceAssistantState.Paused, is VoiceAssistantState.Error -> {
+                                onRequestPermission()
+                                viewModel.startListening()
+                            }
+                            else -> {}
+                        }
+                    }
+                )
+            }
+
+            // ── Bottom Area: Subtitle Display & Minimal Controls ────────
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Real-time Subtitle Display
+                SubtitlePanel(subtitleState = subtitleState)
+
+                // Optional Debug / Transcript Panel (Hidden by default for cinematic immersion)
+                if (showTranscriptOverlay) {
+                    val activeTranscript = when (val s = state) {
+                        is VoiceAssistantState.Listening -> s.partialTranscript
+                        is VoiceAssistantState.Processing -> s.userTranscript
+                        is VoiceAssistantState.Speaking -> s.aiResponse
+                        else -> ""
+                    }
+
+                    AnimatedVisibility(
+                        visible = activeTranscript.isNotBlank(),
+                        enter = fadeIn(),
+                        exit = fadeOut()
+                    ) {
                         Box(
-                            modifier = Modifier.fillParentMaxSize(),
-                            contentAlignment = Alignment.Center
+                            modifier = Modifier
+                                .fillMaxWidth(0.88f)
+                                .background(
+                                    color = JarvisBackground.copy(alpha = 0.85f),
+                                    shape = RoundedCornerShape(4.dp)
+                                )
+                                .border(
+                                    width = 0.8.dp,
+                                    color = JarvisHologram.copy(alpha = 0.35f),
+                                    shape = RoundedCornerShape(4.dp)
+                                )
+                                .padding(horizontal = 14.dp, vertical = 8.dp)
                         ) {
                             Text(
-                                "No active conversation turns yet.\nPress the microphone button to start talking to JARVIS.",
-                                color = Color.Gray,
+                                text = activeTranscript,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.5.sp,
+                                    lineHeight = 16.sp
+                                ),
+                                color = when (state) {
+                                    is VoiceAssistantState.Speaking -> JarvisOrangeBright
+                                    is VoiceAssistantState.Listening -> JarvisOrangeLight
+                                    else -> Color.LightGray
+                                },
                                 textAlign = TextAlign.Center,
-                                style = MaterialTheme.typography.bodyMedium
+                                maxLines = 3,
+                                modifier = Modifier.fillMaxWidth()
                             )
                         }
                     }
-                } else {
-                    items(messages) { msg ->
-                        val isUser = msg.sender == MessageSender.USER
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-                        ) {
-                            Card(
-                                shape = RoundedCornerShape(8.dp),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = if (isUser) Color(0xFF3F3D56) else Color(0xFF26243A)
-                                ),
-                                modifier = Modifier.widthIn(max = 280.dp)
-                            ) {
-                                Column(modifier = Modifier.padding(12.dp)) {
-                                    Text(
-                                        text = if (isUser) "You" else "JARVIS",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (isUser) AuraPrimary else Color.LightGray
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = msg.content,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = Color.White
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Footer controls block
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Status indicator text
-                val statusText = when (state) {
-                    is VoiceAssistantState.Idle -> "JARVIS is idle"
-                    is VoiceAssistantState.Listening -> "Listening..."
-                    is VoiceAssistantState.Processing -> "Thinking..."
-                    is VoiceAssistantState.Speaking -> "Speaking..."
-                    is VoiceAssistantState.Error -> "System Alert"
-                    is VoiceAssistantState.Paused -> "Paused"
                 }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Color.White
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    when (state) {
-                        is VoiceAssistantState.Processing -> {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), color = AuraPrimary, strokeWidth = 2.dp)
-                        }
-                        is VoiceAssistantState.Speaking -> {
-                            Text("🔊", style = MaterialTheme.typography.bodyMedium)
-                        }
-                        else -> {}
-                    }
-                }
-
-                // Error text block
+                // Error Message Display (fallback for non-recoverable error states)
                 if (state is VoiceAssistantState.Error) {
                     Text(
                         text = (state as VoiceAssistantState.Error).errorMessage,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = Color(0xFFFF5252),
                         textAlign = TextAlign.Center,
                         modifier = Modifier.padding(horizontal = 16.dp)
                     )
                 }
 
-                // Partial transcript or query display for active state
-                val activeText = when (val s = state) {
-                    is VoiceAssistantState.Listening -> s.partialTranscript
-                    is VoiceAssistantState.Processing -> s.userTranscript
-                    else -> ""
-                }
-                if (activeText.isNotEmpty()) {
-                    Text(
-                        text = activeText,
-                        color = Color.LightGray,
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 2,
-                        textAlign = TextAlign.Center
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Control buttons
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val isListening = state is VoiceAssistantState.Listening
-                    Button(
-                        onClick = {
-                            if (isListening) {
-                                viewModel.stopListening()
-                            } else {
-                                onRequestPermission()
-                                viewModel.startListening()
+                // Ultra-Subtle Icon-Only Fallback Control (No Text Buttons)
+                Box(
+                    modifier = Modifier
+                        .size(46.dp)
+                        .background(
+                            color = JarvisSurfaceDark.copy(alpha = 0.40f),
+                            shape = CircleShape
+                        )
+                        .border(
+                            width = 0.8.dp,
+                            color = when (state) {
+                                is VoiceAssistantState.Speaking -> JarvisOrangeBright.copy(alpha = 0.70f)
+                                is VoiceAssistantState.Listening -> JarvisOrangeLight.copy(alpha = 0.50f)
+                                else -> JarvisHologram.copy(alpha = 0.25f)
+                            },
+                            shape = CircleShape
+                        )
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = {
+                                when (val s = state) {
+                                    is VoiceAssistantState.Speaking -> viewModel.interruptJarvis()
+                                    is VoiceAssistantState.Listening -> {
+                                        if (s.partialTranscript.isNotBlank()) {
+                                            viewModel.finishUserSpeech(s.partialTranscript)
+                                        } else {
+                                            viewModel.cancelListening()
+                                        }
+                                    }
+                                    is VoiceAssistantState.Idle, is VoiceAssistantState.Paused, is VoiceAssistantState.Error -> {
+                                        onRequestPermission()
+                                        viewModel.startListening()
+                                    }
+                                    else -> {}
+                                }
                             }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isListening) Color.Red else AuraPrimary
-                        )
-                    ) {
-                        Text(
-                            text = if (isListening) "Stop Mic" else "Talk to JARVIS",
-                            color = Color.Black
-                        )
-                    }
-
-                    if (state is VoiceAssistantState.Speaking) {
-                        Button(
-                            onClick = { viewModel.stopSpeaking() },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color.Gray)
-                        ) {
-                            Text("Stop Audio", color = Color.White)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.size(20.dp)) {
+                        val c = Offset(size.width / 2f, size.height / 2f)
+                        when (state) {
+                            is VoiceAssistantState.Speaking -> {
+                                // Stop / Interrupt icon glyph (small square)
+                                drawRect(
+                                    color = JarvisOrangeBright,
+                                    topLeft = Offset(c.x - 4.5f, c.y - 4.5f),
+                                    size = androidx.compose.ui.geometry.Size(9f, 9f)
+                                )
+                            }
+                            is VoiceAssistantState.Listening -> {
+                                // Listening / Active pulse glyph (circle + sound ring)
+                                drawCircle(JarvisOrangeLight, 3.5f, c)
+                                drawCircle(
+                                    color = JarvisOrangeLight.copy(alpha = 0.6f),
+                                    radius = 7.5f,
+                                    center = c,
+                                    style = Stroke(1.2f)
+                                )
+                            }
+                            else -> {
+                                // Ready / Idle icon glyph (power ring with central spark)
+                                drawCircle(
+                                    color = JarvisHologram.copy(alpha = 0.5f),
+                                    radius = 6.5f,
+                                    center = c,
+                                    style = Stroke(1.2f)
+                                )
+                                drawCircle(JarvisOrangeCore.copy(alpha = 0.8f), 2f, c)
+                            }
                         }
                     }
                 }

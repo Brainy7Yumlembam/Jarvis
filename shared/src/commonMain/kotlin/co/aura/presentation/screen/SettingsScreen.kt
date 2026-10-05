@@ -437,6 +437,133 @@ fun SettingsScreen(
                 }
             }
 
+            // NVIDIA NIM Configuration Section
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AuraSurfaceDark),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "NVIDIA NIM Configuration",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = AuraPrimary
+                    )
+
+                    var nvidiaKeyInput by remember { mutableStateOf("") }
+                    var nvidiaModelInput by remember { mutableStateOf(state.nvidiaModel) }
+                    var showNvidiaSaveMsg by remember { mutableStateOf(false) }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (state.isNvidiaKeyConfigured) "Key Configured" else "No Key Configured",
+                            color = if (state.isNvidiaKeyConfigured) Color.Green else Color.Gray,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+
+                        val statusColor = when (state.nvidiaStatus) {
+                            co.aura.ai.CredentialStatus.AVAILABLE -> Color(0xFF4CAF50)
+                            co.aura.ai.CredentialStatus.COOLDOWN -> Color(0xFFFF9800)
+                            co.aura.ai.CredentialStatus.INVALID -> Color(0xFFF44336)
+                            else -> Color.DarkGray
+                        }
+                        Text(
+                            text = state.nvidiaStatus.name,
+                            color = statusColor,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = nvidiaModelInput,
+                        onValueChange = {
+                            nvidiaModelInput = it
+                            viewModel.onEvent(SettingsAction.UpdateNvidiaModel(it))
+                        },
+                        label = { Text("Model (e.g. meta/llama-3.1-8b-instruct)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AuraPrimary,
+                            focusedLabelColor = AuraPrimary,
+                            unfocusedTextColor = Color.White,
+                            focusedTextColor = Color.White
+                        )
+                    )
+
+                    OutlinedTextField(
+                        value = nvidiaKeyInput,
+                        onValueChange = {
+                            nvidiaKeyInput = it
+                            showNvidiaSaveMsg = false
+                        },
+                        label = { Text(if (state.isNvidiaKeyConfigured) "Replace NVIDIA API Key" else "NVIDIA API Key (nvapi-...)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AuraPrimary,
+                            focusedLabelColor = AuraPrimary,
+                            unfocusedTextColor = Color.White,
+                            focusedTextColor = Color.White
+                        )
+                    )
+
+                    if (showNvidiaSaveMsg) {
+                        Text(
+                            text = "NVIDIA key saved successfully!",
+                            color = Color.Green,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                if (nvidiaKeyInput.isNotBlank()) {
+                                    viewModel.onEvent(SettingsAction.SaveNvidiaKey(nvidiaKeyInput))
+                                    nvidiaKeyInput = ""
+                                    showNvidiaSaveMsg = true
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AuraPrimary,
+                                contentColor = Color.Black
+                            ),
+                            enabled = nvidiaKeyInput.isNotBlank()
+                        ) {
+                            Text("Save Key")
+                        }
+
+                        Button(
+                            onClick = {
+                                viewModel.onEvent(SettingsAction.ClearNvidiaKey)
+                                nvidiaKeyInput = ""
+                                showNvidiaSaveMsg = false
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFE53935),
+                                contentColor = Color.White
+                            ),
+                            enabled = state.isNvidiaKeyConfigured
+                        ) {
+                            Text("Clear Key")
+                        }
+                    }
+                }
+            }
+
             // AI Engine Settings Section
             Card(
                 colors = CardDefaults.cardColors(containerColor = AuraSurfaceDark),
@@ -475,6 +602,22 @@ fun SettingsScreen(
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.clickable {
+                                viewModel.onEvent(SettingsAction.UpdateAiProvider(AiProviderType.NVIDIA))
+                            }
+                        ) {
+                            RadioButton(
+                                selected = state.aiProviderType == AiProviderType.NVIDIA,
+                                onClick = {
+                                    viewModel.onEvent(SettingsAction.UpdateAiProvider(AiProviderType.NVIDIA))
+                                },
+                                colors = RadioButtonDefaults.colors(selectedColor = AuraPrimary)
+                            )
+                            Text("NVIDIA NIM", color = Color.White)
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.clickable {
                                 viewModel.onEvent(SettingsAction.UpdateAiProvider(AiProviderType.LOCAL))
                             }
                         ) {
@@ -485,24 +628,34 @@ fun SettingsScreen(
                                 },
                                 colors = RadioButtonDefaults.colors(selectedColor = AuraPrimary)
                             )
-                            Text("Local AI (Coming Soon)", color = Color.White)
+                            Text("Local AI", color = Color.White)
                         }
                     }
 
                     Spacer(modifier = Modifier.height(4.dp))
 
-                    if (state.aiProviderType == AiProviderType.GEMINI) {
-                        Text(
-                            text = "Gemini AI is active.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.Gray
-                        )
-                    } else {
-                        Text(
-                            text = "Local AI is not available on this device yet.\nJARVIS will continue using Gemini.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.Gray
-                        )
+                    when (state.aiProviderType) {
+                        AiProviderType.GEMINI -> {
+                            Text(
+                                text = "Gemini is primary. Automatically fails over to NVIDIA NIM if keys are exhausted.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.Gray
+                            )
+                        }
+                        AiProviderType.NVIDIA -> {
+                            Text(
+                                text = "NVIDIA NIM is primary. Automatically fails over to Gemini if unavailable.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.Gray
+                            )
+                        }
+                        AiProviderType.LOCAL -> {
+                            Text(
+                                text = "Local AI is not available on this device yet.\nJARVIS will continue using configured cloud providers.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.Gray
+                            )
+                        }
                     }
                 }
             }

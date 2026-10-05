@@ -1,6 +1,7 @@
 package co.aura.core.di
 
 import co.aura.actions.*
+import co.aura.agent.*
 import co.aura.ai.*
 import co.aura.automation.*
 import co.aura.backend.*
@@ -34,6 +35,7 @@ val commonModule = module {
     
     // Repositories
     single<ConversationRepository> { ConversationRepositoryImpl(get()) }
+    single<ConversationSummaryRepository> { ConversationSummaryRepositoryImpl(get()) }
     single<MemoryRepository> { MemoryRepositoryImpl(get()) }
     single<DeviceActionRepository> { DeviceActionRepositoryImpl() }
     single<SyncRepository> { SyncRepositoryImpl(get()) }
@@ -42,8 +44,10 @@ val commonModule = module {
     single { GeminiCredentialManager(get()) }
     single { GeminiModelConfig("gemini-3.6-flash") }
     single { GeminiProvider(get(), get(), get<GeminiCredentialManager>(), get()) }
+    single { NvidiaCredentialManager(get()) }
+    single { NvidiaProvider(get(), get(), get()) }
     single { LocalAIProvider(get()) }
-    single<AIProvider> { DelegatingAIProvider(get(), get(), get()) }
+    single<AIProvider> { AIProviderManager(get(), get(), get(), get()) }
     
     // Action / Command Bus Architecture
     single<CommandBus> { CommandBusImpl() }
@@ -54,10 +58,13 @@ val commonModule = module {
     // Cognitive Managers
     single<MemoryRetriever> { KeywordMemoryRetriever(get()) }
     single<ContextBuilder> { ContextBuilderImpl() }
-    single<MemoryManager> { MemoryManagerImpl(get(), get(), get()) }
+    single<MemoryManager> { MemoryManagerImpl(get(), get(), get(), get()) }
+    single<MemoryExtractor> { MemoryExtractorImpl(get()) }
     single<PersonalityEngine> { PersonalityEngineImpl() }
     single<co.aura.voice.SpeechCommandNormalizer> { co.aura.voice.SpeechCommandNormalizer() }
-    single<ConversationManager> { ConversationManagerImpl(get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), getOrNull(), getOrNull()) }
+    single<AgentToolRegistry> { AgentToolRegistryImpl() }
+    single<JarvisAgent> { JarvisAgentImpl(get(), get(), get(), get()) }
+    single<ConversationManager> { ConversationManagerImpl(get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), getOrNull(), getOrNull(), getOrNull(), getOrNull(), getOrNull()) }
     
     // Extension Systems
     single<PluginManager> { PluginManagerImpl().apply {
@@ -85,8 +92,22 @@ val commonModule = module {
     single<SystemControlProvider> { SystemControlProviderImpl() }
     single<VisualIntelligenceProvider> { VisualIntelligenceProviderImpl() }
     
-    factory { VoiceAssistantViewModel(get(), get(), get(), get(), get()) }
+    factory {
+        VoiceAssistantViewModel(
+            voiceRecognizer = get(),
+            ttsEngine = get(),
+            conversationManager = get(),
+            permissionManager = get(),
+            securityManager = get(),
+            interruptionDetector = getOrNull() ?: co.aura.voice.DefaultInterruptionDetector(),
+            visualizerController = getOrNull() ?: co.aura.voice.DefaultAudioVisualizerController(),
+            interruptionMonitor = getOrNull() ?: co.aura.voice.NoOpInterruptionMonitor(),
+            defaultContinuousConversation = true
+        )
+    }
     factory { co.aura.presentation.viewmodel.MemoryViewModel(get()) }
+
+
     factory { co.aura.presentation.viewmodel.SettingsViewModel(get(), get(), get()) }
 }
 

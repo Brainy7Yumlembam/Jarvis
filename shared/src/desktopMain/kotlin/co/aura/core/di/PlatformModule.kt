@@ -45,5 +45,7 @@ actual val platformModule = module {
             override suspend fun resolveContact(name: String): List<co.aura.communication.ContactInfo> = emptyList()
         }
     }
+    single<co.aura.voice.InterruptionMonitor> { co.aura.voice.NoOpInterruptionMonitor() }
     single<co.aura.actions.ActionExecutor> { co.aura.actions.DesktopActionExecutor() }
 }
+

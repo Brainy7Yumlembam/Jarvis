@@ -10,7 +10,9 @@ import co.aura.domain.repository.ConversationRepository
 import co.aura.memory.MemoryManager
 import co.aura.memory.MemoryRetriever
 import co.aura.conversation.ContextBuilder
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.firstOrNull
 import co.aura.actions.Action
@@ -55,6 +57,13 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.jsonArray
 
+import co.aura.domain.repository.ConversationSummaryRepository
+import co.aura.memory.MemoryExtractor
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+
 private object NoOpSecurityManager : SecurityManager {
     override suspend fun authorizeAction(action: Action): Boolean = true
     override suspend fun confirmSensitiveAction(action: Action, promptMessage: String): Boolean = true
@@ -64,6 +73,7 @@ private object NoOpSecurityManager : SecurityManager {
 
 interface ConversationManager {
     suspend fun processUserMessage(text: String): String
+    fun processUserMessageStream(text: String): Flow<String> = flow { emit(processUserMessage(text)) }
     fun getMessages(): Flow<List<ChatMessage>>
     suspend fun clearSession()
 }
@@ -81,7 +91,10 @@ class ConversationManagerImpl(
     private val securityManager: SecurityManager,
     private val aliasResolver: AppAliasResolver,
     private val contactResolver: ContactResolver? = null,
-    private val appRegistry: InstalledAppRegistry? = null
+    private val appRegistry: InstalledAppRegistry? = null,
+    private val conversationSummaryRepository: ConversationSummaryRepository? = null,
+    private val memoryExtractor: MemoryExtractor? = null,
+    private val jarvisAgent: co.aura.agent.JarvisAgent? = null
 ) : ConversationManager {
 
     constructor(
@@ -102,6 +115,9 @@ class ConversationManagerImpl(
         SpeechCommandNormalizer(),
         NoOpSecurityManager,
         AppAliasResolver(),
+        null,
+        null,
+        null,
         null,
         null
     )
@@ -128,8 +144,15 @@ class ConversationManagerImpl(
         NoOpSecurityManager,
         AppAliasResolver(),
         null,
+        null,
+        null,
+        null,
         null
     )
+
+    private val agent: co.aura.agent.JarvisAgent by lazy {
+        jarvisAgent ?: co.aura.agent.JarvisAgentImpl(memoryManager, co.aura.agent.AgentToolRegistryImpl(), personalityEngine, speechNormalizer)
+    }
 
     private val inMemoryHistory = mutableListOf<ChatMessage>()
     private var isHistoryLoaded = false
@@ -174,6 +197,25 @@ class ConversationManagerImpl(
             if (lastMediaApp != null) append("Last media app: $lastMediaApp\n")
             append("Last action: $type\n")
             if (lastActionStatus != null) append("Last action status: $lastActionStatus\n")
+        }
+    }
+
+    private val backgroundScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+    private fun scheduleBackgroundMemoryAndSummarization(userText: String, assistantText: String) {
+        backgroundScope.launch {
+            try {
+                memoryExtractor?.extractAndSaveAsync(userText, assistantText)
+            } catch (e: Exception) {
+                co.aura.core.logging.AuraLogger.w(co.aura.core.logging.LogCategory.AI, "Background memory extraction non-fatal error: ${e.message}")
+            }
+            if (inMemoryHistory.size >= 8) {
+                try {
+                    memoryManager.summarizeOldConversations()
+                } catch (e: Exception) {
+                    co.aura.core.logging.AuraLogger.w(co.aura.core.logging.LogCategory.AI, "Background summarization non-fatal error: ${e.message}")
+                }
+            }
         }
     }
 
@@ -624,97 +666,6 @@ class ConversationManagerImpl(
             }
         }
 
-        val cleaned = text.trim().removeSuffix(".").removeSuffix("?").removeSuffix("!")
-        val lower = cleaned.lowercase()
-
-        // 1. Remember Command
-        val rememberPrefixes = listOf("remember that ", "remember ")
-        var isRemember = false
-        var rememberContent = ""
-        for (prefix in rememberPrefixes) {
-            if (lower.startsWith(prefix)) {
-                isRemember = true
-                rememberContent = cleaned.substring(prefix.length).trim()
-                break
-            }
-        }
-
-        if (isRemember && rememberContent.isNotEmpty()) {
-            val score = memoryManager.scoreMemoryImportance(rememberContent)
-            val success = memoryManager.storeMemory(rememberContent, "PREFERENCE", score)
-            val responseText = if (success) {
-                "I will remember: $rememberContent"
-            } else {
-                "Sorry, I couldn't save that memory. (It may contain sensitive credentials)."
-            }
-            saveMessageAndHistory(text, responseText)
-            return responseText
-        }
-
-        // 2. Forget Command
-        val forgetPrefixes = listOf("forget that ", "forget ")
-        var isForget = false
-        var forgetTarget = ""
-        for (prefix in forgetPrefixes) {
-            if (lower.startsWith(prefix)) {
-                isForget = true
-                forgetTarget = cleaned.substring(prefix.length).trim()
-                break
-            }
-        }
-
-        if (isForget && forgetTarget.isNotEmpty()) {
-            val allMemories = memoryManager.searchMemories("")
-            val matches = allMemories.filter { it.content.lowercase().contains(forgetTarget.lowercase()) }
-
-            val responseText = when {
-                matches.isEmpty() -> {
-                    "I couldn't find any memory matching: \"$forgetTarget\"."
-                }
-                matches.size == 1 -> {
-                    val targetId = matches.first().id
-                    memoryManager.forgetMemory(targetId)
-                    "I have forgotten: \"${matches.first().content}\"."
-                }
-                else -> {
-                    "I found multiple memories related to \"$forgetTarget\". Which one would you like me to forget?\n" +
-                            matches.map { "- ${it.content}" }.joinToString("\n")
-                }
-            }
-            saveMessageAndHistory(text, responseText)
-            return responseText
-        }
-
-        // 3. Query Command
-        val queryPhrases = listOf("what do you remember about me", "show me what you remember about me")
-        if (queryPhrases.any { lower.contains(it) }) {
-            val allMemories = memoryManager.searchMemories("")
-            val responseText = if (allMemories.isEmpty()) {
-                "I don't have any saved memories about you yet."
-            } else {
-                "Here is what I remember about you:\n" +
-                        allMemories.map { "- ${it.content}" }.joinToString("\n")
-            }
-            saveMessageAndHistory(text, responseText)
-            return responseText
-        }
-
-        // 4. Normal Conversation Message
-        val userMsg = ChatMessage(
-            id = "msg_${System.currentTimeMillis()}",
-            sessionId = "session_default",
-            sender = MessageSender.USER,
-            content = text,
-            timestamp = System.currentTimeMillis(),
-            status = MessageStatus.SENT
-        )
-        inMemoryHistory.add(userMsg)
-        try {
-            conversationRepository.saveMessage(userMsg)
-        } catch (e: Exception) {
-            // Ignore DB cache errors
-        }
-
         // Extract Dynamic ConversationMode from settings
         val modeStr = securityManager.getSecureToken("conversation_mode") ?: "HYBRID"
         val conversationMode = try {
@@ -723,29 +674,64 @@ class ConversationManagerImpl(
             ConversationMode.HYBRID
         }
 
-        val systemInstruction = "You are JARVIS, a personal assistant built, created, and developed by $JARVIS_CREATOR_NAME."
-        val personalityPrompt = personalityEngine.getSystemInstructions(conversationMode)
-        
-        // Retrieve relevant memories for the conversation
-        val relevantMemories = memoryManager.retrieveRelevantMemories(text, limit = 5)
+        val conversationSummary = try {
+            conversationSummaryRepository?.getSummary("session_default")
+        } catch (e: Exception) {
+            null
+        }
 
-        val contextPrompt = contextBuilder.buildContext(
-            systemInstructions = systemInstruction,
-            personalityPrompt = personalityPrompt,
+        val planResult = agent.plan(
+            userText = text,
             conversationMode = conversationMode,
-            relevantMemories = relevantMemories,
-            recentMessages = inMemoryHistory.takeLast(10),
+            inMemoryHistory = inMemoryHistory,
             recentActionContext = getRecentActionContextString(),
-            currentRequest = normalizedActionText
+            conversationSummary = conversationSummary
         )
 
-        val responseText = try {
-            aiProvider.generateResponse(contextPrompt)
-        } catch (e: AuraError) {
-            throw e
-        } catch (e: Exception) {
-            co.aura.core.logging.AuraLogger.e(co.aura.core.logging.LogCategory.AI, "AI request failed", e)
-            throw AuraError.AIRequestError("Sorry, sir. I'm having trouble reaching my AI service at the moment.")
+        val responseText = when (planResult) {
+            is co.aura.agent.AgentPlanResult.DirectResponse -> {
+                val action = planResult.action
+                val responseMsg = if (action != null) {
+                    if (actionValidator.validateAction(action)) {
+                        val result = actionRouter.routeAction(action)
+                        lastActionType = action.actionType
+                        lastActionStatus = if (result is ActionResult.Success) "Success" else "Failure"
+                        planResult.responseText
+                    } else {
+                        "Sir, the requested action is invalid."
+                    }
+                } else {
+                    planResult.responseText
+                }
+                saveMessageAndHistory(text, responseMsg)
+                scheduleBackgroundMemoryAndSummarization(text, responseMsg)
+                return responseMsg
+            }
+            is co.aura.agent.AgentPlanResult.RequiresAi -> {
+                val userMsg = ChatMessage(
+                    id = "msg_${System.currentTimeMillis()}",
+                    sessionId = "session_default",
+                    sender = MessageSender.USER,
+                    content = text,
+                    timestamp = System.currentTimeMillis(),
+                    status = MessageStatus.SENT
+                )
+                inMemoryHistory.add(userMsg)
+                try {
+                    conversationRepository.saveMessage(userMsg)
+                } catch (e: Exception) {}
+
+                val contextPrompt = contextBuilder.buildContext(planResult.agentContext)
+
+                try {
+                    aiProvider.generateResponse(contextPrompt)
+                } catch (e: AuraError) {
+                    throw e
+                } catch (e: Exception) {
+                    co.aura.core.logging.AuraLogger.e(co.aura.core.logging.LogCategory.AI, "AI request failed", e)
+                    throw AuraError.AIRequestError("Sorry, sir. I'm having trouble reaching my AI service at the moment.")
+                }
+            }
         }
 
         val cleanedResponse = responseText.trim()
@@ -837,6 +823,9 @@ class ConversationManagerImpl(
             // Ignore DB cache errors
         }
 
+        // Asynchronous background extraction and summarization
+        scheduleBackgroundMemoryAndSummarization(text, finalResponseText)
+
         return finalResponseText
     }
 
@@ -880,6 +869,335 @@ class ConversationManagerImpl(
             conversationRepository.clearHistory()
         } catch (e: Exception) {
             // Ignore
+        }
+        try {
+            conversationSummaryRepository?.clearSummary("session_default")
+        } catch (e: Exception) {
+            // Ignore
+        }
+    }
+
+    override fun processUserMessageStream(text: String): Flow<String> = flow {
+        ensureHistoryLoaded()
+
+        val normalizedActionText = speechNormalizer.normalize(text)
+        val lowerInput = normalizedActionText.lowercase().trim()
+
+        // ── 0a. Confirmation flow — yes/no executes exactly once ──────────────────
+        val confirmation = pendingConfirmation
+        if (confirmation != null && !pendingConfirmationConsumed) {
+            val isYes = lowerInput == "yes" || lowerInput.contains("yes") || lowerInput.contains("confirm") || lowerInput.contains("do it") || lowerInput.contains("go ahead")
+            val isNo  = lowerInput == "no"  || lowerInput.contains("no")  || lowerInput.contains("cancel") || lowerInput.contains("stop") || lowerInput.contains("abort")
+            if (isYes || isNo) {
+                pendingConfirmation = null
+                pendingConfirmationConsumed = true
+                val responseMsg = if (isYes) {
+                    val result = when (confirmation) {
+                        is PendingConfirmation.Call ->
+                            actionRouter.routeAction(co.aura.actions.CallAction(confirmation.contact.phoneNumber))
+                        is PendingConfirmation.Sms ->
+                            actionRouter.routeAction(co.aura.actions.SmsAction(confirmation.contact.phoneNumber, confirmation.message))
+                        is PendingConfirmation.WhatsApp ->
+                            actionRouter.routeAction(co.aura.actions.SendWhatsAppAction(confirmation.contactName, confirmation.message))
+                    }
+                    lastActionStatus = if (result is ActionResult.Success) "Success" else "Failure"
+                    result.message
+                } else {
+                    lastActionStatus = "Cancelled"
+                    val name = when (confirmation) {
+                        is PendingConfirmation.Call -> confirmation.contactName
+                        is PendingConfirmation.Sms -> confirmation.contactName
+                        is PendingConfirmation.WhatsApp -> confirmation.contactName
+                    }
+                    "Understood, sir. The action for $name has been cancelled."
+                }
+                pendingConfirmationConsumed = false
+                saveMessageAndHistory(text, responseMsg)
+                emit(responseMsg)
+                return@flow
+            }
+        } else if (pendingConfirmationConsumed) {
+            pendingConfirmationConsumed = false
+        }
+
+        // ── 0b. Contact ambiguity resolution ─────────────────────────────────────
+        val contactCandidates = pendingContactCandidates
+        if (contactCandidates != null) {
+            pendingContactCandidates = null
+            val action = pendingContactAction
+            val message = pendingContactMessage
+            pendingContactAction = null
+            pendingContactMessage = null
+
+            val normText = speechNormalizer.normalize(text)
+            val selectedContact = when {
+                lowerInput.contains("first") || lowerInput.contains("1st") || normText == "1" -> contactCandidates.getOrNull(0)
+                lowerInput.contains("second") || lowerInput.contains("2nd") || normText == "2" -> contactCandidates.getOrNull(1)
+                lowerInput.contains("third") || lowerInput.contains("3rd") || normText == "3" -> contactCandidates.getOrNull(2)
+                else -> contactCandidates.firstOrNull { candidate ->
+                    val normName = speechNormalizer.normalize(candidate.name)
+                    lowerInput.contains(candidate.name.lowercase()) ||
+                    candidate.name.lowercase().contains(lowerInput) ||
+                    normText.contains(normName) || normName.contains(normText) ||
+                    ContactMatchingUtils.isFuzzyMatch(lowerInput, candidate.name)
+                }
+            }
+            if (selectedContact != null && action != null) {
+                val responseMsg = scheduleConfirmation(selectedContact, action, message ?: "")
+                saveMessageAndHistory(text, responseMsg)
+                emit(responseMsg)
+                return@flow
+            }
+        }
+
+        // ── 0c. Music player selection resolution ─────────────────────────────────
+        val musicCandidates = pendingMusicSelectionCandidates
+        if (musicCandidates != null) {
+            pendingMusicSelectionCandidates = null
+            val savedQuery = pendingMediaQuery ?: ""
+            pendingMediaQuery = null
+
+            val rawLower = text.lowercase().trim()
+            val normText = speechNormalizer.normalize(text)
+
+            val isAlways = rawLower.contains("always") || rawLower.contains("forever") || rawLower.contains("default")
+            val isThisTime = rawLower.contains("this time") || rawLower.contains("just for now") || rawLower.contains("only now")
+
+            val selectedApp = resolveMusicCandidateChoice(normText, rawLower, musicCandidates)
+            if (selectedApp != null) {
+                if (isAlways || (!isThisTime && securityManager.getSecureToken("preferred_music_app").isNullOrBlank())) {
+                    securityManager.saveSecureToken("preferred_music_app", selectedApp.packageName)
+                }
+
+                lastMediaApp = selectedApp.label
+                lastMediaQuery = savedQuery
+                val actionResult = actionRouter.routeAction(PlayMediaAction(query = savedQuery, source = null, targetPackage = selectedApp.packageName))
+                lastActionType = "PLAY_MEDIA"
+                lastActionStatus = if (actionResult is ActionResult.Success) "Success" else "Failure"
+
+                val responseMsg = actionResult.message
+                saveMessageAndHistory(text, responseMsg)
+                emit(responseMsg)
+                return@flow
+            }
+        }
+
+        // ── 0d. App-ambiguity resolution ──────────────────────────────────────────
+        val candidates = pendingResolutionCandidates
+        if (candidates != null) {
+            pendingResolutionCandidates = null
+            val category = pendingResolutionQuery
+            pendingResolutionQuery = null
+
+            val normalizedReply = speechNormalizer.normalize(text)
+            val selectedApp = candidates.firstOrNull { candidate ->
+                val normLabel = speechNormalizer.normalize(candidate.label)
+                normalizedReply.contains(normLabel) || normLabel.contains(normalizedReply)
+            }
+            if (selectedApp != null) {
+                if (category != null) {
+                    securityManager.saveSecureToken("preferred_app_$category", selectedApp.packageName)
+                }
+                val actionResult = actionRouter.routeAction(OpenAppAction(selectedApp.packageName))
+                lastOpenedApp = selectedApp.label
+                lastActionType = "OPEN_APP"
+                lastActionStatus = "Success"
+                val responseMsg = "Opening ${selectedApp.label}, sir."
+                saveMessageAndHistory(text, responseMsg)
+                emit(responseMsg)
+                return@flow
+            }
+        }
+
+        val modeStr = securityManager.getSecureToken("conversation_mode") ?: "HYBRID"
+        val conversationMode = try {
+            ConversationMode.valueOf(modeStr)
+        } catch (e: Exception) {
+            ConversationMode.HYBRID
+        }
+
+        val conversationSummary = try {
+            conversationSummaryRepository?.getSummary("session_default")
+        } catch (e: Exception) {
+            null
+        }
+
+        val planResult = agent.plan(
+            userText = text,
+            conversationMode = conversationMode,
+            inMemoryHistory = inMemoryHistory,
+            recentActionContext = getRecentActionContextString(),
+            conversationSummary = conversationSummary
+        )
+
+        val contextPrompt = when (planResult) {
+            is co.aura.agent.AgentPlanResult.DirectResponse -> {
+                val action = planResult.action
+                val responseMsg = if (action != null) {
+                    if (actionValidator.validateAction(action)) {
+                        val result = actionRouter.routeAction(action)
+                        lastActionType = action.actionType
+                        lastActionStatus = if (result is ActionResult.Success) "Success" else "Failure"
+                        planResult.responseText
+                    } else {
+                        "Sir, the requested action is invalid."
+                    }
+                } else {
+                    planResult.responseText
+                }
+                saveMessageAndHistory(text, responseMsg)
+                scheduleBackgroundMemoryAndSummarization(text, responseMsg)
+                emit(responseMsg)
+                return@flow
+            }
+            is co.aura.agent.AgentPlanResult.RequiresAi -> {
+                val userMsg = ChatMessage(
+                    id = "msg_${System.currentTimeMillis()}",
+                    sessionId = "session_default",
+                    sender = MessageSender.USER,
+                    content = text,
+                    timestamp = System.currentTimeMillis(),
+                    status = MessageStatus.SENT
+                )
+                inMemoryHistory.add(userMsg)
+                try {
+                    conversationRepository.saveMessage(userMsg)
+                } catch (e: Exception) {}
+
+                contextBuilder.buildContext(planResult.agentContext)
+            }
+        }
+
+        val chunker = SentenceChunker()
+        val accumulatedFullResponse = StringBuilder()
+        var isActionDecisionJson: Boolean? = null
+        val initialBuffer = StringBuilder()
+
+        try {
+            aiProvider.streamResponse(contextPrompt).collect { token ->
+                accumulatedFullResponse.append(token)
+
+                if (isActionDecisionJson == null) {
+                    initialBuffer.append(token)
+                    val trimmedInit = initialBuffer.toString().trim()
+                    if (trimmedInit.startsWith("{") || trimmedInit.startsWith("```")) {
+                        if (trimmedInit.length > 30 || trimmedInit.contains("\n") || trimmedInit.contains("\"type\"") || trimmedInit.contains("\"actionType\"")) {
+                            isActionDecisionJson = true
+                        }
+                    } else if (trimmedInit.isNotEmpty()) {
+                        isActionDecisionJson = false
+                        val chunks = chunker.append(initialBuffer.toString())
+                        for (c in chunks) {
+                            emit(c)
+                        }
+                        initialBuffer.clear()
+                    }
+                } else if (isActionDecisionJson == true) {
+                    // Buffering action JSON in accumulatedFullResponse
+                } else {
+                    val chunks = chunker.append(token)
+                    for (c in chunks) {
+                        emit(c)
+                    }
+                }
+            }
+
+            if (isActionDecisionJson == true || (isActionDecisionJson == null && initialBuffer.toString().trim().startsWith("{"))) {
+                val fullRaw = accumulatedFullResponse.toString().trim()
+                val cleanedJson = fullRaw.removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+                val decision = if (cleanedJson.startsWith("{") && cleanedJson.endsWith("}")) {
+                    parseAssistantDecision(cleanedJson)
+                } else {
+                    null
+                } ?: AssistantDecision(
+                    type = "NORMAL_CONVERSATION",
+                    response = fullRaw
+                )
+
+                val actionResults = mutableListOf<Pair<Action, ActionResult>>()
+                for (action in decision.actions) {
+                    if (!actionValidator.validateAction(action)) {
+                        actionResults.add(action to ActionResult.Failure("Sir, the requested action is invalid."))
+                        break
+                    }
+                    val actionResult: ActionResult = when (action) {
+                        is CallContactAction -> resolveAndConfirmContact(action.contactName, "CALL", null)
+                        is SendSmsAction     -> resolveAndConfirmContact(action.contactName, "SMS", action.message)
+                        is SendWhatsAppAction -> resolveAndConfirmContact(action.contactName, "WHATSAPP", action.message)
+                        is PlayMediaAction   -> handlePlayMediaRequest(action)
+                        else -> actionRouter.routeAction(action)
+                    }
+                    actionResults.add(action to actionResult)
+                    lastActionType = action.actionType
+                    lastActionStatus = if (actionResult is ActionResult.Success) "Success" else "Failure"
+                    if (actionResult is ActionResult.Ambiguity) {
+                        if (action is OpenAppAction) {
+                            pendingResolutionCandidates = actionResult.candidates
+                            pendingResolutionQuery = aliasResolver.getCanonicalKey(action.appName) ?: aliasResolver.normalize(action.appName)
+                        }
+                        break
+                    }
+                    if (actionResult is ActionResult.Failure) break
+                }
+
+                val finalResponseText = if (actionResults.isNotEmpty()) {
+                    finalizeResponse(decision, actionResults)
+                } else {
+                    decision.response
+                }
+
+                // Pass through SentenceChunker so TTS queue receives sequential sentence chunks
+                val sentenceChunks = chunker.append(finalResponseText) + chunker.flush()
+                if (sentenceChunks.isEmpty() && finalResponseText.isNotBlank()) {
+                    emit(finalResponseText)
+                } else {
+                    for (sentence in sentenceChunks) {
+                        emit(sentence)
+                    }
+                }
+
+                val assistantMsg = ChatMessage(
+                    id = "msg_${System.currentTimeMillis() + 1}",
+                    sessionId = "session_default",
+                    sender = MessageSender.ASSISTANT,
+                    content = finalResponseText,
+                    timestamp = System.currentTimeMillis() + 1,
+                    status = MessageStatus.SENT
+                )
+                inMemoryHistory.add(assistantMsg)
+                try {
+                    conversationRepository.saveMessage(assistantMsg)
+                } catch (e: Exception) {}
+
+                // CRITICAL: Schedule memory extraction and summarization AFTER response is handed to TTS
+                scheduleBackgroundMemoryAndSummarization(text, finalResponseText)
+            } else {
+                val remaining = chunker.flush()
+                for (c in remaining) {
+                    emit(c)
+                }
+
+                val fullAssistantText = accumulatedFullResponse.toString().trim()
+                if (fullAssistantText.isNotEmpty()) {
+                    val assistantMsg = ChatMessage(
+                        id = "msg_${System.currentTimeMillis() + 1}",
+                        sessionId = "session_default",
+                        sender = MessageSender.ASSISTANT,
+                        content = fullAssistantText,
+                        timestamp = System.currentTimeMillis() + 1,
+                        status = MessageStatus.SENT
+                    )
+                    inMemoryHistory.add(assistantMsg)
+                    try {
+                        conversationRepository.saveMessage(assistantMsg)
+                    } catch (e: Exception) {}
+
+                    // CRITICAL: Schedule memory extraction and summarization AFTER response is handed to TTS
+                    scheduleBackgroundMemoryAndSummarization(text, fullAssistantText)
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
         }
     }
 }

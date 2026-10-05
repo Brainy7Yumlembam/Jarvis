@@ -16,3 +16,24 @@ VALUES (?, ?, ?, ?, ?, ?);
 
 clearHistory:
 DELETE FROM chat_message;
+
+CREATE TABLE IF NOT EXISTS conversation_summary (
+    session_id TEXT NOT NULL PRIMARY KEY,
+    summary TEXT NOT NULL,
+    last_summarized_message_id TEXT,
+    updated_at INTEGER NOT NULL
+);
+
+getSummary:
+SELECT summary FROM conversation_summary WHERE session_id = ?;
+
+getSummaryRecord:
+SELECT * FROM conversation_summary WHERE session_id = ?;
+
+insertOrUpdateSummary:
+INSERT OR REPLACE INTO conversation_summary (session_id, summary, last_summarized_message_id, updated_at)
+VALUES (?, ?, ?, ?);
+
+clearSummary:
+DELETE FROM conversation_summary WHERE session_id = ?;
+

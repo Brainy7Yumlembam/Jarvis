@@ -9,10 +9,15 @@ import io.ktor.client.plugins.ClientRequestException
 import io.ktor.client.plugins.RedirectResponseException
 import io.ktor.client.plugins.ServerResponseException
 import io.ktor.client.request.post
+import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.readUTF8Line
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.Serializable
@@ -59,20 +64,23 @@ class GeminiProvider(
         json: Json
     ) : this(httpClient, modelConfig, GeminiCredentialManager(securityManager), json)
 
+    suspend fun hasAvailableCredentials(): Boolean {
+        return geminiCredentialManager.getBestAvailableCredential() != null
+    }
+
     override suspend fun generateResponse(prompt: String): String {
         var retries = 0
         var lastException: Exception? = null
         while (retries < 10) {
             val credential = geminiCredentialManager.getBestAvailableCredential()
             if (credential == null) {
-                AuraLogger.e(LogCategory.AI, "No available Gemini credentials configured or all are in cooldown/invalid state.")
+                AuraLogger.e(LogCategory.AI, "[GEMINI] No available Gemini credentials configured or all are in cooldown/invalid state.")
                 if (lastException != null) throw lastException
                 throw AuraError.AIRequestError("No available Gemini credentials configured.")
             }
 
             val slot = credential.slot
             val apiKey = credential.apiKey ?: ""
-            val label = credential.label
 
             if (apiKey.isBlank()) {
                 geminiCredentialManager.removeCredential(slot)
@@ -82,7 +90,8 @@ class GeminiProvider(
 
             geminiCredentialManager.setActiveSlot(slot)
             val formattedSlot = if (slot < 10) "0$slot" else "$slot"
-            AuraLogger.i(LogCategory.AI, "Gemini Project $formattedSlot selected.")
+            AuraLogger.i(LogCategory.AI, "[GEMINI] Request started")
+            AuraLogger.i(LogCategory.AI, "[GEMINI] Current key index: $slot")
 
             val url = "https://generativelanguage.googleapis.com/v1beta/models/${modelConfig.modelName}:generateContent?key=$apiKey"
             val requestBody = GeminiRequest(
@@ -98,9 +107,10 @@ class GeminiProvider(
                 }
                 val statusCode = response.status.value
                 val responseText = response.bodyAsText()
+                AuraLogger.i(LogCategory.AI, "[GEMINI] Response: $statusCode")
                 
                 if (statusCode in 200..299) {
-                    AuraLogger.i(LogCategory.AI, "Gemini Project $formattedSlot request successful.")
+                    AuraLogger.i(LogCategory.AI, "[GEMINI] Request successful")
                     val geminiResponse = try {
                         json.decodeFromString<GeminiResponse>(responseText)
                     } catch (e: Exception) {
@@ -130,17 +140,20 @@ class GeminiProvider(
                         val cooldownMs = retryAfterHeader?.toLongOrNull()?.times(1000) ?: 300000L
                         val mapped = mapHttpError(statusCode, errorMsg)
                         lastException = mapped
-                        AuraLogger.w(LogCategory.AI, "Gemini Project $formattedSlot rate limited. Trying next project.")
+                        AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded")
+                        AuraLogger.w(LogCategory.AI, "[GEMINI] Applying cooldown")
                         geminiCredentialManager.markCooldown(slot, cooldownMs)
                         geminiCredentialManager.setActiveSlot(null)
+                        AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                         retries++
                         continue
                     } else if (statusCode == 401) {
                         val mapped = mapHttpError(statusCode, errorMsg)
                         lastException = mapped
-                        AuraLogger.w(LogCategory.AI, "Gemini Project $formattedSlot API key unauthorized. Trying next project.")
+                        AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
                         geminiCredentialManager.markInvalid(slot)
                         geminiCredentialManager.setActiveSlot(null)
+                        AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                         retries++
                         continue
                     } else if (statusCode == 403) {
@@ -152,15 +165,25 @@ class GeminiProvider(
                         if (isInvalid) {
                             val mapped = mapHttpError(statusCode, errorMsg)
                             lastException = mapped
-                            AuraLogger.w(LogCategory.AI, "Gemini Project $formattedSlot API key invalid (403). Trying next project.")
+                            AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
                             geminiCredentialManager.markInvalid(slot)
                             geminiCredentialManager.setActiveSlot(null)
+                            AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                             retries++
                             continue
                         } else {
                             geminiCredentialManager.setActiveSlot(null)
                             throw mapHttpError(statusCode, errorMsg)
                         }
+                    } else if (statusCode in 500..599) {
+                        val mapped = mapHttpError(statusCode, errorMsg)
+                        lastException = mapped
+                        AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode). Trying next available key.")
+                        geminiCredentialManager.markCooldown(slot, 30000L)
+                        geminiCredentialManager.setActiveSlot(null)
+                        AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                        retries++
+                        continue
                     } else {
                         geminiCredentialManager.setActiveSlot(null)
                         throw mapHttpError(statusCode, errorMsg)
@@ -185,53 +208,53 @@ class GeminiProvider(
                     val cooldownMs = retryAfterHeader?.toLongOrNull()?.times(1000) ?: 300000L
                     val mapped = mapHttpError(statusCode, errorMsg)
                     lastException = mapped
-                    AuraLogger.w(LogCategory.AI, "Gemini Project $formattedSlot rate limited (ClientRequestException). Trying next project.")
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded")
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Applying cooldown")
                     geminiCredentialManager.markCooldown(slot, cooldownMs)
                     geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                     retries++
                     continue
-                } else if (statusCode == 401) {
+                } else if (statusCode == 401 || statusCode == 403) {
                     val mapped = mapHttpError(statusCode, errorMsg)
                     lastException = mapped
-                    AuraLogger.w(LogCategory.AI, "Gemini Project $formattedSlot API key unauthorized (ClientRequestException). Trying next project.")
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
                     geminiCredentialManager.markInvalid(slot)
                     geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                     retries++
                     continue
-                } else if (statusCode == 403) {
-                    val isInvalid = errorDetails?.status == "API_KEY_INVALID" || 
-                                    errorMsg.contains("api key not valid", ignoreCase = true) ||
-                                    errorMsg.contains("invalid api key", ignoreCase = true) ||
-                                    errorMsg.contains("api key is invalid", ignoreCase = true)
-                    
-                    if (isInvalid) {
-                        val mapped = mapHttpError(statusCode, errorMsg)
-                        lastException = mapped
-                        AuraLogger.w(LogCategory.AI, "Gemini Project $formattedSlot API key invalid (ClientRequestException 403). Trying next project.")
-                        geminiCredentialManager.markInvalid(slot)
-                        geminiCredentialManager.setActiveSlot(null)
-                        retries++
-                        continue
-                    } else {
-                        geminiCredentialManager.setActiveSlot(null)
-                        throw mapHttpError(statusCode, errorMsg)
-                    }
+                } else if (statusCode in 500..599) {
+                    val mapped = mapHttpError(statusCode, errorMsg)
+                    lastException = mapped
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode). Trying next available key.")
+                    geminiCredentialManager.markCooldown(slot, 30000L)
+                    geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                    retries++
+                    continue
                 } else {
                     geminiCredentialManager.setActiveSlot(null)
                     throw mapHttpError(statusCode, errorMsg)
                 }
             } catch (e: ServerResponseException) {
-                geminiCredentialManager.setActiveSlot(null)
                 val statusCode = e.response.status.value
                 val responseText = e.response.bodyAsText()
                 val errorMsg = parseErrorMessage(responseText, statusCode)
-                throw mapHttpError(statusCode, errorMsg)
+                val mapped = mapHttpError(statusCode, errorMsg)
+                lastException = mapped
+                AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode). Trying next available key.")
+                geminiCredentialManager.markCooldown(slot, 30000L)
+                geminiCredentialManager.setActiveSlot(null)
+                AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                retries++
+                continue
             } catch (e: AuraError) {
                 geminiCredentialManager.setActiveSlot(null)
                 throw e
             } catch (e: Exception) {
                 geminiCredentialManager.setActiveSlot(null)
-                AuraLogger.e(LogCategory.AI, "Network or system error during Gemini call: ${e.message}", e)
+                AuraLogger.e(LogCategory.AI, "[GEMINI] Network error: ${e.message}", e)
                 throw AuraError.AINetworkError("Unable to reach. Check your internet connection.")
             }
         }
@@ -241,7 +264,220 @@ class GeminiProvider(
     }
 
     override fun streamResponse(prompt: String): Flow<String> = flow {
-        emit(generateResponse(prompt))
+        var retries = 0
+        var lastException: Exception? = null
+        val streamId = (kotlin.random.Random.nextLong(100000, 999999))
+
+        while (retries < 10) {
+            val credential = geminiCredentialManager.getBestAvailableCredential()
+            if (credential == null) {
+                AuraLogger.e(LogCategory.AI, "[GEMINI] No available Gemini credentials configured or all are in cooldown/invalid state.")
+                if (lastException != null) throw lastException
+                throw AuraError.AIRequestError("No available Gemini credentials configured.")
+            }
+
+            val slot = credential.slot
+            val apiKey = credential.apiKey ?: ""
+
+            if (apiKey.isBlank()) {
+                geminiCredentialManager.removeCredential(slot)
+                retries++
+                continue
+            }
+
+            geminiCredentialManager.setActiveSlot(slot)
+            val formattedSlot = if (slot < 10) "0$slot" else "$slot"
+            AuraLogger.i(LogCategory.AI, "[GEMINI] Request started")
+            AuraLogger.i(LogCategory.AI, "[GEMINI] Current key index: $slot")
+
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/${modelConfig.modelName}:streamGenerateContent?alt=sse&key=$apiKey"
+            val requestBody = GeminiRequest(
+                contents = listOf(
+                    GeminiContent(parts = listOf(GeminiPart(text = prompt)))
+                )
+            )
+
+            var streamCompletedNormally = false
+            var hasEmittedAnyChunk = false
+
+            try {
+                httpClient.preparePost(url) {
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody)
+                }.execute { response ->
+                    val statusCode = response.status.value
+                    AuraLogger.i(LogCategory.AI, "[GEMINI] Response: $statusCode")
+
+                    if (statusCode in 200..299) {
+                        AuraLogger.i(LogCategory.AI, "[AI] Stream START id=$streamId")
+                        val channel: ByteReadChannel = response.bodyAsChannel()
+                        var chunkCount = 0
+
+                        while (!channel.isClosedForRead) {
+                            val line = channel.readUTF8Line() ?: break
+                            if (line.startsWith("data: ")) {
+                                val dataJson = line.removePrefix("data: ").trim()
+                                if (dataJson.isNotEmpty() && dataJson != "[DONE]") {
+                                    // Check if dataJson contains an SSE error payload
+                                    val errResp = try { json.decodeFromString<GeminiErrorResponse>(dataJson) } catch (e: Exception) { null }
+                                    if (errResp?.error != null) {
+                                        val errCode = errResp.error.code ?: 500
+                                        val errMsg = errResp.error.message ?: "Stream error $errCode"
+                                        AuraLogger.e(LogCategory.AI, "[GEMINI] SSE stream error: $errCode - $errMsg")
+                                        throw mapHttpError(errCode, errMsg)
+                                    }
+
+                                    try {
+                                        val geminiResponse = json.decodeFromString<GeminiResponse>(dataJson)
+                                        val text = geminiResponse.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+                                        if (!text.isNullOrEmpty()) {
+                                            chunkCount++
+                                            hasEmittedAnyChunk = true
+                                            AuraLogger.i(LogCategory.AI, "[AI] Stream CHUNK id=$streamId chunk=#$chunkCount size=${text.length}: \"${text.trim()}\"")
+                                            emit(text)
+                                        }
+                                    } catch (e: Exception) {
+                                        if (e is AuraError) throw e
+                                        AuraLogger.w(LogCategory.AI, "[AI] Failed to parse stream chunk: ${e.message}")
+                                    }
+                                }
+                            }
+                        }
+
+                        AuraLogger.i(LogCategory.AI, "[GEMINI] Request successful")
+                        AuraLogger.i(LogCategory.AI, "[AI] Stream COMPLETE id=$streamId totalChunks=$chunkCount")
+                        geminiCredentialManager.setActiveSlot(null)
+                        streamCompletedNormally = true
+                    } else {
+                        val responseText = response.bodyAsText()
+                        val errorResponse = try {
+                            json.decodeFromString<GeminiErrorResponse>(responseText)
+                        } catch (e: Exception) {
+                            null
+                        }
+                        val errorDetails = errorResponse?.error
+                        val errorMsg = errorDetails?.message ?: "HTTP Error $statusCode"
+
+                        if (statusCode == 429) {
+                            val retryAfterHeader = response.headers["Retry-After"]
+                            val cooldownMs = retryAfterHeader?.toLongOrNull()?.times(1000) ?: 300000L
+                            lastException = mapHttpError(statusCode, errorMsg)
+                            AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded")
+                            AuraLogger.w(LogCategory.AI, "[GEMINI] Applying cooldown")
+                            geminiCredentialManager.markCooldown(slot, cooldownMs)
+                            geminiCredentialManager.setActiveSlot(null)
+                            AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                            retries++
+                            return@execute
+                        } else if (statusCode == 401) {
+                            lastException = mapHttpError(statusCode, errorMsg)
+                            AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
+                            geminiCredentialManager.markInvalid(slot)
+                            geminiCredentialManager.setActiveSlot(null)
+                            AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                            retries++
+                            return@execute
+                        } else if (statusCode == 403) {
+                            val isInvalid = errorDetails?.status == "API_KEY_INVALID" ||
+                                            errorMsg.contains("api key not valid", ignoreCase = true) ||
+                                            errorMsg.contains("invalid api key", ignoreCase = true) ||
+                                            errorMsg.contains("api key is invalid", ignoreCase = true)
+                            if (isInvalid) {
+                                lastException = mapHttpError(statusCode, errorMsg)
+                                AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
+                                geminiCredentialManager.markInvalid(slot)
+                                geminiCredentialManager.setActiveSlot(null)
+                                AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                                retries++
+                                return@execute
+                            } else {
+                                geminiCredentialManager.setActiveSlot(null)
+                                throw mapHttpError(statusCode, errorMsg)
+                            }
+                        } else if (statusCode in 500..599) {
+                            lastException = mapHttpError(statusCode, errorMsg)
+                            AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode). Trying next available key.")
+                            geminiCredentialManager.markCooldown(slot, 30000L)
+                            geminiCredentialManager.setActiveSlot(null)
+                            AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                            retries++
+                            return@execute
+                        } else {
+                            geminiCredentialManager.setActiveSlot(null)
+                            throw mapHttpError(statusCode, errorMsg)
+                        }
+                    }
+                }
+
+                if (streamCompletedNormally) {
+                    AuraLogger.i(LogCategory.AI, "[AI] Request END id=$streamId")
+                    return@flow
+                }
+            } catch (e: CancellationException) {
+                geminiCredentialManager.setActiveSlot(null)
+                AuraLogger.i(LogCategory.AI, "[AI] Stream CANCELLED id=$streamId")
+                throw e
+            } catch (e: ClientRequestException) {
+                val statusCode = e.response.status.value
+                val responseText = e.response.bodyAsText()
+                val errorResponse = try {
+                    json.decodeFromString<GeminiErrorResponse>(responseText)
+                } catch (ex: Exception) {
+                    null
+                }
+                val errorDetails = errorResponse?.error
+                val errorMsg = errorDetails?.message ?: "HTTP Error $statusCode"
+
+                if (hasEmittedAnyChunk) {
+                    // Safety Rule 5: Mid-stream failover must NOT duplicate speech
+                    geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Mid-stream failure (ClientRequestException $statusCode) after emission. Terminating stream cleanly.")
+                    throw mapHttpError(statusCode, errorMsg)
+                }
+
+                if (statusCode == 429) {
+                    val retryAfterHeader = e.response.headers["Retry-After"]
+                    val cooldownMs = retryAfterHeader?.toLongOrNull()?.times(1000) ?: 300000L
+                    lastException = mapHttpError(statusCode, errorMsg)
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded")
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Applying cooldown")
+                    geminiCredentialManager.markCooldown(slot, cooldownMs)
+                    geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                    retries++
+                    continue
+                } else if (statusCode == 401 || statusCode == 403) {
+                    lastException = mapHttpError(statusCode, errorMsg)
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
+                    geminiCredentialManager.markInvalid(slot)
+                    geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                    retries++
+                    continue
+                } else if (statusCode in 500..599) {
+                    lastException = mapHttpError(statusCode, errorMsg)
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode). Trying next available key.")
+                    geminiCredentialManager.markCooldown(slot, 30000L)
+                    geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                    retries++
+                    continue
+                } else {
+                    geminiCredentialManager.setActiveSlot(null)
+                    throw mapHttpError(statusCode, errorMsg)
+                }
+            } catch (e: AuraError) {
+                geminiCredentialManager.setActiveSlot(null)
+                throw e
+            } catch (e: Exception) {
+                geminiCredentialManager.setActiveSlot(null)
+                AuraLogger.e(LogCategory.AI, "[GEMINI] Network error: ${e.message}", e)
+                throw AuraError.AINetworkError("Unable to reach. Check your internet connection.")
+            }
+        }
+
+        if (lastException != null) throw lastException
+        throw AuraError.AIRequestError("All configured Gemini credentials exhausted or unavailable.")
     }
 
     override suspend fun summarize(text: String): String {

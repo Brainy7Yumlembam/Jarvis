@@ -6,6 +6,7 @@ import co.aura.voice.TextToSpeechEngine
 import co.aura.ai.AiProviderType
 import co.aura.ai.GeminiCredential
 import co.aura.ai.GeminiCredentialManager
+import co.aura.ai.NvidiaCredentialManager
 import co.aura.ai.CredentialStatus
 import kotlinx.coroutines.launch
 
@@ -23,7 +24,10 @@ data class SettingsState(
     val geminiCredentials: List<GeminiCredential> = emptyList(),
     val activeGeminiProject: String = "None",
     val configuredProjectsCount: Int = 0,
-    val selectedConversationMode: ConversationMode = ConversationMode.HYBRID
+    val selectedConversationMode: ConversationMode = ConversationMode.HYBRID,
+    val isNvidiaKeyConfigured: Boolean = false,
+    val nvidiaModel: String = "meta/llama-3.1-8b-instruct",
+    val nvidiaStatus: CredentialStatus = CredentialStatus.EMPTY
 )
 
 sealed interface SettingsAction {
@@ -39,21 +43,26 @@ sealed interface SettingsAction {
     data class SaveProjectCredential(val slot: Int, val label: String, val apiKey: String?, val enabled: Boolean) : SettingsAction
     data class RemoveProjectCredential(val slot: Int) : SettingsAction
     data class UpdateConversationMode(val mode: ConversationMode) : SettingsAction
+    data class SaveNvidiaKey(val key: String) : SettingsAction
+    object ClearNvidiaKey : SettingsAction
+    data class UpdateNvidiaModel(val model: String) : SettingsAction
 }
 
 class SettingsViewModel(
     private val securityManager: SecurityManager,
     private val ttsEngine: TextToSpeechEngine,
-    private val geminiCredentialManager: GeminiCredentialManager
+    private val geminiCredentialManager: GeminiCredentialManager,
+    private val nvidiaCredentialManager: NvidiaCredentialManager = NvidiaCredentialManager(securityManager)
 ) : BaseViewModel<SettingsState, SettingsAction>(SettingsState()) {
 
     constructor(
         securityManager: SecurityManager,
         ttsEngine: TextToSpeechEngine
-    ) : this(securityManager, ttsEngine, GeminiCredentialManager(securityManager))
+    ) : this(securityManager, ttsEngine, GeminiCredentialManager(securityManager), NvidiaCredentialManager(securityManager))
 
     init {
         checkKeyStatus()
+        checkNvidiaKeyStatus()
         loadVoiceSettings()
         launchInScope {
             geminiCredentialManager.credentials.collect { list ->
@@ -98,6 +107,45 @@ class SettingsViewModel(
             is SettingsAction.SaveProjectCredential -> saveProjectCredential(event.slot, event.label, event.apiKey, event.enabled)
             is SettingsAction.RemoveProjectCredential -> removeProjectCredential(event.slot)
             is SettingsAction.UpdateConversationMode -> updateConversationMode(event.mode)
+            is SettingsAction.SaveNvidiaKey -> saveNvidiaKey(event.key)
+            is SettingsAction.ClearNvidiaKey -> clearNvidiaKey()
+            is SettingsAction.UpdateNvidiaModel -> updateNvidiaModel(event.model)
+        }
+    }
+
+    private fun checkNvidiaKeyStatus() {
+        launchInScope {
+            val key = nvidiaCredentialManager.getApiKey()
+            val model = nvidiaCredentialManager.getModel()
+            nvidiaCredentialManager.refresh()
+            updateState {
+                it.copy(
+                    isNvidiaKeyConfigured = !key.isNullOrBlank(),
+                    nvidiaModel = model,
+                    nvidiaStatus = nvidiaCredentialManager.status.value
+                )
+            }
+        }
+    }
+
+    private fun saveNvidiaKey(newKey: String) {
+        launchInScope {
+            nvidiaCredentialManager.saveApiKey(newKey)
+            checkNvidiaKeyStatus()
+        }
+    }
+
+    private fun clearNvidiaKey() {
+        launchInScope {
+            nvidiaCredentialManager.clearApiKey()
+            checkNvidiaKeyStatus()
+        }
+    }
+
+    private fun updateNvidiaModel(model: String) {
+        launchInScope {
+            nvidiaCredentialManager.saveModel(model)
+            updateState { it.copy(nvidiaModel = model) }
         }
     }
 
