@@ -30,13 +30,39 @@ data class GeminiPart(val text: String? = null)
 data class GeminiContent(val parts: List<GeminiPart>? = null)
 
 @Serializable
-data class GeminiRequest(val contents: List<GeminiContent>)
+data class GeminiThinkingConfig(
+    val thinkingBudget: Int? = null
+)
+
+@Serializable
+data class GeminiGenerationConfig(
+    val maxOutputTokens: Int? = null,
+    val thinkingConfig: GeminiThinkingConfig? = null
+)
+
+@Serializable
+data class GeminiRequest(
+    val contents: List<GeminiContent>,
+    val generationConfig: GeminiGenerationConfig? = null
+)
 
 @Serializable
 data class GeminiCandidate(val content: GeminiContent? = null)
 
 @Serializable
-data class GeminiResponse(val candidates: List<GeminiCandidate>? = null)
+data class GeminiUsageMetadata(
+    val promptTokenCount: Int? = null,
+    val candidatesTokenCount: Int? = null,
+    val totalTokenCount: Int? = null,
+    val thinkingTokenCount: Int? = null
+)
+
+@Serializable
+data class GeminiResponse(
+    val candidates: List<GeminiCandidate>? = null,
+    val usageMetadata: GeminiUsageMetadata? = null,
+    val modelVersion: String? = null
+)
 
 @Serializable
 data class GeminiErrorDetails(
@@ -71,7 +97,10 @@ class GeminiProvider(
     override suspend fun generateResponse(prompt: String): String {
         var retries = 0
         var lastException: Exception? = null
-        while (retries < 10) {
+        val maxRotations = 3
+        val startTime = System.currentTimeMillis()
+
+        while (retries < maxRotations) {
             val credential = geminiCredentialManager.getBestAvailableCredential()
             if (credential == null) {
                 AuraLogger.e(LogCategory.AI, "[GEMINI] No available Gemini credentials configured or all are in cooldown/invalid state.")
@@ -90,6 +119,7 @@ class GeminiProvider(
 
             geminiCredentialManager.setActiveSlot(slot)
             val formattedSlot = if (slot < 10) "0$slot" else "$slot"
+            AuraLogger.i(LogCategory.AI, "[LLM] START slot=$formattedSlot model=${modelConfig.modelName}")
             AuraLogger.i(LogCategory.AI, "[GEMINI] Request started")
             AuraLogger.i(LogCategory.AI, "[GEMINI] Current key index: $slot")
 
@@ -97,6 +127,10 @@ class GeminiProvider(
             val requestBody = GeminiRequest(
                 contents = listOf(
                     GeminiContent(parts = listOf(GeminiPart(text = prompt)))
+                ),
+                generationConfig = GeminiGenerationConfig(
+                    maxOutputTokens = modelConfig.maxOutputTokens,
+                    thinkingConfig = if (modelConfig.thinkingBudget >= 0) GeminiThinkingConfig(modelConfig.thinkingBudget) else null
                 )
             )
 
@@ -107,6 +141,7 @@ class GeminiProvider(
                 }
                 val statusCode = response.status.value
                 val responseText = response.bodyAsText()
+                AuraLogger.i(LogCategory.AI, "[LLM] END slot=$formattedSlot statusCode=$statusCode")
                 AuraLogger.i(LogCategory.AI, "[GEMINI] Response: $statusCode")
                 
                 if (statusCode in 200..299) {
@@ -124,6 +159,20 @@ class GeminiProvider(
                         throw AuraError.AIResponseError("Received empty response from Gemini.")
                     }
                     
+                    val durationMs = System.currentTimeMillis() - startTime
+                    val usage = geminiResponse.usageMetadata
+                    TokenUsageTracker.recordUsage(
+                        model = geminiResponse.modelVersion ?: modelConfig.modelName,
+                        routingReason = "AI_QUERY",
+                        promptTokens = usage?.promptTokenCount,
+                        candidateTokens = usage?.candidatesTokenCount,
+                        thinkingTokens = usage?.thinkingTokenCount,
+                        durationMs = durationMs,
+                        wasRetried = retries > 0,
+                        promptLength = prompt.length,
+                        responseLength = text.length
+                    )
+
                     geminiCredentialManager.setActiveSlot(null)
                     return text
                 } else {
@@ -140,19 +189,21 @@ class GeminiProvider(
                         val cooldownMs = retryAfterHeader?.toLongOrNull()?.times(1000) ?: 300000L
                         val mapped = mapHttpError(statusCode, errorMsg)
                         lastException = mapped
-                        AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded")
-                        AuraLogger.w(LogCategory.AI, "[GEMINI] Applying cooldown")
+                        AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded (slot $slot)")
+                        AuraLogger.w(LogCategory.AI, "[GEMINI] Applying cooldown: ${cooldownMs}ms")
                         geminiCredentialManager.markCooldown(slot, cooldownMs)
                         geminiCredentialManager.setActiveSlot(null)
+                        AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=QUOTA_EXCEEDED")
                         AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                         retries++
                         continue
                     } else if (statusCode == 401) {
                         val mapped = mapHttpError(statusCode, errorMsg)
                         lastException = mapped
-                        AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
+                        AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode for slot $slot)")
                         geminiCredentialManager.markInvalid(slot)
                         geminiCredentialManager.setActiveSlot(null)
+                        AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=UNAUTHORIZED")
                         AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                         retries++
                         continue
@@ -165,9 +216,10 @@ class GeminiProvider(
                         if (isInvalid) {
                             val mapped = mapHttpError(statusCode, errorMsg)
                             lastException = mapped
-                            AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
+                            AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode for slot $slot)")
                             geminiCredentialManager.markInvalid(slot)
                             geminiCredentialManager.setActiveSlot(null)
+                            AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=INVALID_KEY")
                             AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                             retries++
                             continue
@@ -175,12 +227,18 @@ class GeminiProvider(
                             geminiCredentialManager.setActiveSlot(null)
                             throw mapHttpError(statusCode, errorMsg)
                         }
+                    } else if (statusCode == 404) {
+                        // Model not found - do not rotate keys
+                        geminiCredentialManager.setActiveSlot(null)
+                        AuraLogger.e(LogCategory.AI, "[GEMINI] Model ${modelConfig.modelName} not found (HTTP 404). Not rotating keys.")
+                        throw mapHttpError(statusCode, errorMsg)
                     } else if (statusCode in 500..599) {
                         val mapped = mapHttpError(statusCode, errorMsg)
                         lastException = mapped
-                        AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode). Trying next available key.")
+                        AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode for slot $slot). Trying next available key.")
                         geminiCredentialManager.markCooldown(slot, 30000L)
                         geminiCredentialManager.setActiveSlot(null)
+                        AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=SERVER_ERROR")
                         AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                         retries++
                         continue
@@ -189,6 +247,10 @@ class GeminiProvider(
                         throw mapHttpError(statusCode, errorMsg)
                     }
                 }
+            } catch (e: CancellationException) {
+                geminiCredentialManager.setActiveSlot(null)
+                AuraLogger.i(LogCategory.AI, "[LLM] CANCELLED slot=$formattedSlot")
+                throw e
             } catch (e: RedirectResponseException) {
                 geminiCredentialManager.setActiveSlot(null)
                 throw e
@@ -208,28 +270,54 @@ class GeminiProvider(
                     val cooldownMs = retryAfterHeader?.toLongOrNull()?.times(1000) ?: 300000L
                     val mapped = mapHttpError(statusCode, errorMsg)
                     lastException = mapped
-                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded")
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded (slot $slot)")
                     AuraLogger.w(LogCategory.AI, "[GEMINI] Applying cooldown")
                     geminiCredentialManager.markCooldown(slot, cooldownMs)
                     geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=QUOTA_EXCEEDED")
                     AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                     retries++
                     continue
-                } else if (statusCode == 401 || statusCode == 403) {
+                } else if (statusCode == 401) {
                     val mapped = mapHttpError(statusCode, errorMsg)
                     lastException = mapped
-                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode for slot $slot)")
                     geminiCredentialManager.markInvalid(slot)
                     geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=UNAUTHORIZED")
                     AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                     retries++
                     continue
+                } else if (statusCode == 403) {
+                    val isInvalid = errorDetails?.status == "API_KEY_INVALID" || 
+                                    errorMsg.contains("api key not valid", ignoreCase = true) ||
+                                    errorMsg.contains("invalid api key", ignoreCase = true) ||
+                                    errorMsg.contains("api key is invalid", ignoreCase = true)
+                    if (isInvalid) {
+                        val mapped = mapHttpError(statusCode, errorMsg)
+                        lastException = mapped
+                        AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode for slot $slot)")
+                        geminiCredentialManager.markInvalid(slot)
+                        geminiCredentialManager.setActiveSlot(null)
+                        AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=INVALID_KEY")
+                        AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                        retries++
+                        continue
+                    } else {
+                        geminiCredentialManager.setActiveSlot(null)
+                        throw mapHttpError(statusCode, errorMsg)
+                    }
+                } else if (statusCode == 404) {
+                    geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.e(LogCategory.AI, "[GEMINI] Model ${modelConfig.modelName} not found (HTTP 404). Not rotating keys.")
+                    throw mapHttpError(statusCode, errorMsg)
                 } else if (statusCode in 500..599) {
                     val mapped = mapHttpError(statusCode, errorMsg)
                     lastException = mapped
-                    AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode). Trying next available key.")
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode for slot $slot). Trying next available key.")
                     geminiCredentialManager.markCooldown(slot, 30000L)
                     geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=SERVER_ERROR")
                     AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                     retries++
                     continue
@@ -243,9 +331,10 @@ class GeminiProvider(
                 val errorMsg = parseErrorMessage(responseText, statusCode)
                 val mapped = mapHttpError(statusCode, errorMsg)
                 lastException = mapped
-                AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode). Trying next available key.")
+                AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode for slot $slot). Trying next available key.")
                 geminiCredentialManager.markCooldown(slot, 30000L)
                 geminiCredentialManager.setActiveSlot(null)
+                AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=SERVER_ERROR")
                 AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                 retries++
                 continue
@@ -267,8 +356,11 @@ class GeminiProvider(
         var retries = 0
         var lastException: Exception? = null
         val streamId = (kotlin.random.Random.nextLong(100000, 999999))
+        val maxRotations = 3
 
-        while (retries < 10) {
+        val startTime = System.currentTimeMillis()
+
+        while (retries < maxRotations) {
             val credential = geminiCredentialManager.getBestAvailableCredential()
             if (credential == null) {
                 AuraLogger.e(LogCategory.AI, "[GEMINI] No available Gemini credentials configured or all are in cooldown/invalid state.")
@@ -287,6 +379,7 @@ class GeminiProvider(
 
             geminiCredentialManager.setActiveSlot(slot)
             val formattedSlot = if (slot < 10) "0$slot" else "$slot"
+            AuraLogger.i(LogCategory.AI, "[LLM] START slot=$formattedSlot streamId=$streamId model=${modelConfig.modelName}")
             AuraLogger.i(LogCategory.AI, "[GEMINI] Request started")
             AuraLogger.i(LogCategory.AI, "[GEMINI] Current key index: $slot")
 
@@ -294,6 +387,10 @@ class GeminiProvider(
             val requestBody = GeminiRequest(
                 contents = listOf(
                     GeminiContent(parts = listOf(GeminiPart(text = prompt)))
+                ),
+                generationConfig = GeminiGenerationConfig(
+                    maxOutputTokens = modelConfig.maxOutputTokens,
+                    thinkingConfig = if (modelConfig.thinkingBudget >= 0) GeminiThinkingConfig(modelConfig.thinkingBudget) else null
                 )
             )
 
@@ -306,12 +403,16 @@ class GeminiProvider(
                     setBody(requestBody)
                 }.execute { response ->
                     val statusCode = response.status.value
+                    AuraLogger.i(LogCategory.AI, "[LLM] RESPONSE slot=$formattedSlot statusCode=$statusCode")
                     AuraLogger.i(LogCategory.AI, "[GEMINI] Response: $statusCode")
 
                     if (statusCode in 200..299) {
                         AuraLogger.i(LogCategory.AI, "[AI] Stream START id=$streamId")
                         val channel: ByteReadChannel = response.bodyAsChannel()
                         var chunkCount = 0
+                        var latestUsage: GeminiUsageMetadata? = null
+                        var latestModelVersion: String? = null
+                        val fullStreamText = StringBuilder()
 
                         while (!channel.isClosedForRead) {
                             val line = channel.readUTF8Line() ?: break
@@ -329,10 +430,18 @@ class GeminiProvider(
 
                                     try {
                                         val geminiResponse = json.decodeFromString<GeminiResponse>(dataJson)
+                                        if (geminiResponse.usageMetadata != null) {
+                                            latestUsage = geminiResponse.usageMetadata
+                                        }
+                                        if (geminiResponse.modelVersion != null) {
+                                            latestModelVersion = geminiResponse.modelVersion
+                                        }
+
                                         val text = geminiResponse.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
                                         if (!text.isNullOrEmpty()) {
                                             chunkCount++
                                             hasEmittedAnyChunk = true
+                                            fullStreamText.append(text)
                                             AuraLogger.i(LogCategory.AI, "[AI] Stream CHUNK id=$streamId chunk=#$chunkCount size=${text.length}: \"${text.trim()}\"")
                                             emit(text)
                                         }
@@ -343,6 +452,19 @@ class GeminiProvider(
                                 }
                             }
                         }
+
+                        val durationMs = System.currentTimeMillis() - startTime
+                        TokenUsageTracker.recordUsage(
+                            model = latestModelVersion ?: modelConfig.modelName,
+                            routingReason = "AI_STREAM_QUERY",
+                            promptTokens = latestUsage?.promptTokenCount,
+                            candidateTokens = latestUsage?.candidatesTokenCount,
+                            thinkingTokens = latestUsage?.thinkingTokenCount,
+                            durationMs = durationMs,
+                            wasRetried = retries > 0,
+                            promptLength = prompt.length,
+                            responseLength = fullStreamText.length
+                        )
 
                         AuraLogger.i(LogCategory.AI, "[GEMINI] Request successful")
                         AuraLogger.i(LogCategory.AI, "[AI] Stream COMPLETE id=$streamId totalChunks=$chunkCount")
@@ -362,18 +484,20 @@ class GeminiProvider(
                             val retryAfterHeader = response.headers["Retry-After"]
                             val cooldownMs = retryAfterHeader?.toLongOrNull()?.times(1000) ?: 300000L
                             lastException = mapHttpError(statusCode, errorMsg)
-                            AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded")
+                            AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded (slot $slot)")
                             AuraLogger.w(LogCategory.AI, "[GEMINI] Applying cooldown")
                             geminiCredentialManager.markCooldown(slot, cooldownMs)
                             geminiCredentialManager.setActiveSlot(null)
+                            AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=QUOTA_EXCEEDED")
                             AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                             retries++
                             return@execute
                         } else if (statusCode == 401) {
                             lastException = mapHttpError(statusCode, errorMsg)
-                            AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
+                            AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode for slot $slot)")
                             geminiCredentialManager.markInvalid(slot)
                             geminiCredentialManager.setActiveSlot(null)
+                            AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=UNAUTHORIZED")
                             AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                             retries++
                             return@execute
@@ -384,9 +508,10 @@ class GeminiProvider(
                                             errorMsg.contains("api key is invalid", ignoreCase = true)
                             if (isInvalid) {
                                 lastException = mapHttpError(statusCode, errorMsg)
-                                AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
+                                AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode for slot $slot)")
                                 geminiCredentialManager.markInvalid(slot)
                                 geminiCredentialManager.setActiveSlot(null)
+                                AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=INVALID_KEY")
                                 AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                                 retries++
                                 return@execute
@@ -394,11 +519,16 @@ class GeminiProvider(
                                 geminiCredentialManager.setActiveSlot(null)
                                 throw mapHttpError(statusCode, errorMsg)
                             }
+                        } else if (statusCode == 404) {
+                            geminiCredentialManager.setActiveSlot(null)
+                            AuraLogger.e(LogCategory.AI, "[GEMINI] Model ${modelConfig.modelName} not found (HTTP 404). Not rotating keys.")
+                            throw mapHttpError(statusCode, errorMsg)
                         } else if (statusCode in 500..599) {
                             lastException = mapHttpError(statusCode, errorMsg)
-                            AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode). Trying next available key.")
+                            AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode for slot $slot). Trying next available key.")
                             geminiCredentialManager.markCooldown(slot, 30000L)
                             geminiCredentialManager.setActiveSlot(null)
+                            AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=SERVER_ERROR")
                             AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                             retries++
                             return@execute
@@ -415,6 +545,7 @@ class GeminiProvider(
                 }
             } catch (e: CancellationException) {
                 geminiCredentialManager.setActiveSlot(null)
+                AuraLogger.i(LogCategory.AI, "[LLM] CANCELLED streamId=$streamId slot=$formattedSlot")
                 AuraLogger.i(LogCategory.AI, "[AI] Stream CANCELLED id=$streamId")
                 throw e
             } catch (e: ClientRequestException) {
@@ -439,26 +570,51 @@ class GeminiProvider(
                     val retryAfterHeader = e.response.headers["Retry-After"]
                     val cooldownMs = retryAfterHeader?.toLongOrNull()?.times(1000) ?: 300000L
                     lastException = mapHttpError(statusCode, errorMsg)
-                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded")
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key quota exceeded (slot $slot)")
                     AuraLogger.w(LogCategory.AI, "[GEMINI] Applying cooldown")
                     geminiCredentialManager.markCooldown(slot, cooldownMs)
                     geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=QUOTA_EXCEEDED")
                     AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                     retries++
                     continue
-                } else if (statusCode == 401 || statusCode == 403) {
+                } else if (statusCode == 401) {
                     lastException = mapHttpError(statusCode, errorMsg)
-                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode)")
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode for slot $slot)")
                     geminiCredentialManager.markInvalid(slot)
                     geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=UNAUTHORIZED")
                     AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                     retries++
                     continue
+                } else if (statusCode == 403) {
+                    val isInvalid = errorDetails?.status == "API_KEY_INVALID" ||
+                                    errorMsg.contains("api key not valid", ignoreCase = true) ||
+                                    errorMsg.contains("invalid api key", ignoreCase = true) ||
+                                    errorMsg.contains("api key is invalid", ignoreCase = true)
+                    if (isInvalid) {
+                        lastException = mapHttpError(statusCode, errorMsg)
+                        AuraLogger.w(LogCategory.AI, "[GEMINI] Key invalid / unauthorized ($statusCode for slot $slot)")
+                        geminiCredentialManager.markInvalid(slot)
+                        geminiCredentialManager.setActiveSlot(null)
+                        AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=INVALID_KEY")
+                        AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
+                        retries++
+                        continue
+                    } else {
+                        geminiCredentialManager.setActiveSlot(null)
+                        throw mapHttpError(statusCode, errorMsg)
+                    }
+                } else if (statusCode == 404) {
+                    geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.e(LogCategory.AI, "[GEMINI] Model ${modelConfig.modelName} not found (HTTP 404). Not rotating keys.")
+                    throw mapHttpError(statusCode, errorMsg)
                 } else if (statusCode in 500..599) {
                     lastException = mapHttpError(statusCode, errorMsg)
-                    AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode). Trying next available key.")
+                    AuraLogger.w(LogCategory.AI, "[GEMINI] Server error ($statusCode for slot $slot). Trying next available key.")
                     geminiCredentialManager.markCooldown(slot, 30000L)
                     geminiCredentialManager.setActiveSlot(null)
+                    AuraLogger.i(LogCategory.AI, "[LLM] ROTATE slot=$formattedSlot -> next reason=SERVER_ERROR")
                     AuraLogger.i(LogCategory.AI, "[GEMINI] Switching to next available key")
                     retries++
                     continue

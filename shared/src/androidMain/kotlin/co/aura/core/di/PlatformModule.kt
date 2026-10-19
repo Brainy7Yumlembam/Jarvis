@@ -27,6 +27,6 @@ actual val platformModule = module {
     single<co.aura.actions.AppAliasResolver> { co.aura.actions.AppAliasResolver() }
     single<co.aura.communication.ContactResolver> { co.aura.communication.AndroidContactResolver(get()) }
     single<co.aura.voice.InterruptionMonitor> { co.aura.voice.AndroidInterruptionMonitor(get()) }
-    single<co.aura.actions.ActionExecutor> { co.aura.actions.AndroidActionExecutor(get(), get(), get(), get(), get()) }
+    single<co.aura.actions.ActionExecutor> { co.aura.actions.AndroidActionExecutor(get(), get(), get(), get(), get(), getOrNull()) }
 }
 

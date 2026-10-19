@@ -29,14 +29,66 @@ class AndroidActionExecutor(
     private val appRegistry: InstalledAppRegistry,
     private val aliasResolver: AppAliasResolver,
     private val securityManager: SecurityManager,
-    private val contactResolver: ContactResolver
+    private val contactResolver: ContactResolver,
+    private val noteManager: co.aura.router.LocalNoteManager? = null
 ) : ActionExecutor {
+
+    private val appLauncher by lazy { AndroidAppLauncher(context, appRegistry, aliasResolver) }
+    private val capabilityManager by lazy { DeviceCapabilityManager(context) }
 
     override suspend fun executeAction(action: Action): ActionResult {
         AuraLogger.i(LogCategory.ACTION, "Executing action: ${action.actionType}")
         return try {
             when (action) {
-                is OpenAppAction       -> handleOpenApp(action)
+                is OpenAppAction       -> appLauncher.launchAppByNameOrCategory(action.appName)
+                is OpenSettingsAction  -> appLauncher.openSettingsPanel(action.panel)
+                is OpenUrlAction       -> appLauncher.openUrl(action.url)
+                is WebSearchAction     -> appLauncher.webSearch(action.query)
+                is SendEmailAction     -> appLauncher.sendEmail(action.recipient, action.subject, action.body)
+                is ShareTextAction     -> appLauncher.shareText(action.text, action.title)
+                is CopyToClipboardAction -> appLauncher.copyToClipboard(action.text, action.label)
+
+                is GetDeviceInfoAction -> {
+                    when (action.infoType) {
+                        DeviceInfoType.DATE -> capabilityManager.getCurrentDate()
+                        DeviceInfoType.TIME -> capabilityManager.getCurrentTime()
+                        DeviceInfoType.BATTERY -> capabilityManager.getBatteryLevel()
+                        DeviceInfoType.CHARGING -> capabilityManager.getChargingStatus()
+                        DeviceInfoType.ANDROID_VERSION -> capabilityManager.getAndroidVersion()
+                        DeviceInfoType.STORAGE -> capabilityManager.getStorageInfo()
+                        DeviceInfoType.NETWORK_CONNECTIVITY -> capabilityManager.getConnectivityStatus()
+                        DeviceInfoType.WIFI_STATUS -> capabilityManager.getWifiStatus()
+                        DeviceInfoType.BLUETOOTH_STATUS -> capabilityManager.getBluetoothStatus()
+                        DeviceInfoType.FLASHLIGHT_STATUS -> capabilityManager.getFlashlightStatus()
+                    }
+                }
+                is GetBatteryAction    -> capabilityManager.getBatteryLevel()
+                is GetCurrentTimeAction -> capabilityManager.getCurrentTime()
+                is ToggleFlashlightAction -> capabilityManager.setFlashlight(action.enabled)
+                is VolumeUpAction      -> capabilityManager.adjustVolumeStep(increase = true)
+                is VolumeDownAction    -> capabilityManager.adjustVolumeStep(increase = false)
+                is SetVolumeAction     -> capabilityManager.setVolumeLevel(action.level)
+                is MuteVolumeAction    -> capabilityManager.muteVolume()
+                is ShowVolumePanelAction -> capabilityManager.showVolumePanel()
+
+                is ManageNoteAction    -> {
+                    val manager = noteManager ?: co.aura.router.LocalNoteManager(co.aura.memory.MemoryManagerImpl(co.aura.data.repository.MemoryRepositoryImpl(co.aura.core.database.DatabaseHelper(app.cash.sqldelight.driver.android.AndroidSqliteDriver(co.aura.database.AuraDatabase.Schema, context, "aura.db"))), co.aura.data.repository.ConversationRepositoryImpl(co.aura.core.database.DatabaseHelper(app.cash.sqldelight.driver.android.AndroidSqliteDriver(co.aura.database.AuraDatabase.Schema, context, "aura.db"))), co.aura.memory.KeywordMemoryRetriever(co.aura.data.repository.MemoryRepositoryImpl(co.aura.core.database.DatabaseHelper(app.cash.sqldelight.driver.android.AndroidSqliteDriver(co.aura.database.AuraDatabase.Schema, context, "aura.db"))))))
+                    when (action.operation) {
+                        NoteOperationType.CREATE -> ActionResult.Success(manager.addNote(action.content))
+                        NoteOperationType.READ_ALL -> ActionResult.Success(manager.readNotesSummary())
+                        NoteOperationType.SEARCH -> ActionResult.Success(manager.searchNotes(action.content))
+                        NoteOperationType.DELETE -> ActionResult.Success(manager.deleteNote(action.content))
+                    }
+                }
+                is ManageReminderAction -> {
+                    val manager = noteManager ?: co.aura.router.LocalNoteManager(co.aura.memory.MemoryManagerImpl(co.aura.data.repository.MemoryRepositoryImpl(co.aura.core.database.DatabaseHelper(app.cash.sqldelight.driver.android.AndroidSqliteDriver(co.aura.database.AuraDatabase.Schema, context, "aura.db"))), co.aura.data.repository.ConversationRepositoryImpl(co.aura.core.database.DatabaseHelper(app.cash.sqldelight.driver.android.AndroidSqliteDriver(co.aura.database.AuraDatabase.Schema, context, "aura.db"))), co.aura.memory.KeywordMemoryRetriever(co.aura.data.repository.MemoryRepositoryImpl(co.aura.core.database.DatabaseHelper(app.cash.sqldelight.driver.android.AndroidSqliteDriver(co.aura.database.AuraDatabase.Schema, context, "aura.db"))))))
+                    when (action.operation) {
+                        ReminderOperationType.CREATE -> ActionResult.Success(manager.addReminder(action.title))
+                        ReminderOperationType.LIST -> ActionResult.Success(manager.listReminders())
+                        ReminderOperationType.CANCEL -> ActionResult.Success("Reminder cancelled, sir.")
+                    }
+                }
+
                 is AlarmAction         -> handleSetAlarmByString(action.time)
                 is SetAlarmAction      -> handleSetAlarm(action.hour, action.minute, action.label)
                 is SetTimerAction      -> handleSetTimer(action.durationSeconds, action.label)
@@ -51,13 +103,8 @@ class AndroidActionExecutor(
                 is SkipMediaAction     -> handleMediaKey(KeyEvent.KEYCODE_MEDIA_NEXT, "Skipped to next track")
                 is PreviousMediaAction -> handleMediaKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS, "Playing previous track")
                 is StopMediaAction     -> handleMediaKey(KeyEvent.KEYCODE_MEDIA_STOP, "Stopped playback")
-                is VolumeUpAction      -> handleVolumeStep(increase = true)
-                is VolumeDownAction    -> handleVolumeStep(increase = false)
-                is SetVolumeAction     -> handleSetVolume(action.level)
-                is ToggleFlashlightAction -> handleFlashlight(action.enabled)
                 is TakeScreenshotAction -> handleScreenshot()
-                is GetBatteryAction    -> handleGetBattery()
-                is GetCurrentTimeAction -> handleGetCurrentTime()
+                is CameraCaptureAction -> handleCameraCapture(action.autoCapture)
                 else -> ActionResult.Failure("Sir, that action type isn't supported yet.")
             }
         } catch (e: Exception) {
@@ -69,46 +116,132 @@ class AndroidActionExecutor(
     // ─── App Launching ──────────────────────────────────────────────────────
 
     private fun handleOpenApp(action: OpenAppAction): ActionResult {
-        val appName = action.appName
+        val appName = action.appName.trim()
         if (appName.isBlank()) return ActionResult.Failure("Sir, the application name is empty.")
         val installedApps = appRegistry.getInstalledApps()
         val normalizedQuery = aliasResolver.normalize(appName)
         val canonicalKey = aliasResolver.getCanonicalKey(appName) ?: normalizedQuery
+
+        // 1. Check saved preferred package
         val savedPackage = runBlocking {
             securityManager.getSecureToken("preferred_app_$canonicalKey")
                 ?: securityManager.getSecureToken("preferred_app_$normalizedQuery")
         }
-        if (savedPackage != null) {
+        if (!savedPackage.isNullOrBlank()) {
             val matchingApp = installedApps.firstOrNull { it.packageName == savedPackage }
-            if (matchingApp != null) return launchApp(matchingApp.packageName)
+            val label = matchingApp?.label ?: appName
+            val launchResult = launchApp(savedPackage, label)
+            if (launchResult is ActionResult.Success) {
+                return launchResult
+            }
         }
+
+        // 2. Resolve via AppAliasResolver
         val result = aliasResolver.resolve(appName, installedApps)
-        return when (result.confidence) {
-            MatchConfidence.EXACT, MatchConfidence.ALIAS, MatchConfidence.STRONG, MatchConfidence.FUZZY ->
-                launchApp(result.matchedApp!!.packageName)
+        when (result.confidence) {
+            MatchConfidence.EXACT, MatchConfidence.ALIAS, MatchConfidence.STRONG, MatchConfidence.FUZZY -> {
+                val matched = result.matchedApp!!
+                val launchResult = launchApp(matched.packageName, matched.label)
+                if (launchResult is ActionResult.Success) {
+                    return launchResult
+                }
+            }
             MatchConfidence.AMBIGUOUS -> {
                 val categoryName = when (canonicalKey) {
                     "chrome" -> "browser"; "music" -> "music app"; "gallery" -> "gallery"; else -> canonicalKey
                 }
-                ActionResult.Ambiguity(
+                return ActionResult.Ambiguity(
                     message = "Sir, I found several candidates for $categoryName: ${result.candidates.joinToString(", ") { it.label }}. Which one?",
                     candidates = result.candidates
                 )
             }
-            MatchConfidence.NONE -> ActionResult.Failure("Sorry, sir. I couldn't find that application on your device.")
+            MatchConfidence.NONE -> {
+                // Continue to system intent fallback
+            }
         }
+
+        // 3. Category / System Intent Fallback for standard Android system capabilities (Camera, Settings, etc.)
+        val systemResult = trySystemIntentForApp(canonicalKey, appName)
+        if (systemResult != null) {
+            return systemResult
+        }
+
+        // 4. App not found or failed to launch
+        return ActionResult.Failure("Sorry, Sir. I couldn't find $appName on your device.")
     }
 
-    private fun launchApp(packageName: String): ActionResult {
+    private fun trySystemIntentForApp(canonicalKey: String, requestedName: String): ActionResult? {
+        val pm = context.packageManager
+        val standardIntent = when (canonicalKey) {
+            "camera" -> Intent(android.provider.MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
+            "settings" -> Intent(android.provider.Settings.ACTION_SETTINGS)
+            "chrome" -> Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_APP_BROWSER) }
+            "gallery" -> Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_APP_GALLERY) }
+            "music" -> Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_APP_MUSIC) }
+            "phone" -> Intent(Intent.ACTION_DIAL)
+            "messages" -> Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_APP_MESSAGING) }
+            "calculator" -> Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_APP_CALCULATOR) }
+            "maps" -> Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_APP_MAPS) }
+            "gmail" -> Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_APP_EMAIL) }
+            else -> null
+        }
+
+        if (standardIntent != null) {
+            standardIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val resolveInfo = pm.resolveActivity(standardIntent, 0)
+            if (resolveInfo != null && resolveInfo.activityInfo != null) {
+                val label = resolveInfo.loadLabel(pm).toString().takeIf { it.isNotBlank() } ?: requestedName
+                return launchIntent(standardIntent, label)
+            }
+        }
+
+        // Secondary fallback for camera
+        if (canonicalKey == "camera") {
+            val captureIntent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val captureInfo = pm.resolveActivity(captureIntent, 0)
+            if (captureInfo != null && captureInfo.activityInfo != null) {
+                val label = captureInfo.loadLabel(pm).toString().takeIf { it.isNotBlank() } ?: requestedName
+                return launchIntent(captureIntent, label)
+            }
+        }
+
+        return null
+    }
+
+    private fun launchApp(packageName: String, appLabel: String? = null): ActionResult {
+        val pm = context.packageManager
+        val name = appLabel ?: packageName
+        val launchIntent = pm.getLaunchIntentForPackage(packageName)
+            ?: return ActionResult.Failure("Sorry, Sir. I couldn't open $name.")
+
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return launchIntent(launchIntent, name)
+    }
+
+    private fun launchIntent(intent: Intent, appLabel: String): ActionResult {
+        val pm = context.packageManager
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val resolveInfo = pm.resolveActivity(intent, 0)
+        if (resolveInfo == null || resolveInfo.activityInfo == null) {
+            AuraLogger.w(LogCategory.ACTION, "Intent failed to resolve to an activity for $appLabel: $intent")
+            return ActionResult.Failure("Sorry, Sir. I couldn't open $appLabel.")
+        }
+
         return try {
-            val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
-                ?: return ActionResult.Failure("Sir, $packageName doesn't appear to be launchable on this device.")
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(launchIntent)
-            ActionResult.Success("Opening application, sir.")
+            context.startActivity(intent)
+            AuraLogger.i(LogCategory.ACTION, "Successfully initiated launch for $appLabel")
+            ActionResult.Success("Opening $appLabel, Sir.")
+        } catch (e: android.content.ActivityNotFoundException) {
+            AuraLogger.e(LogCategory.ACTION, "ActivityNotFoundException when launching $appLabel", e)
+            ActionResult.Failure("Sorry, Sir. I couldn't open $appLabel.")
+        } catch (e: SecurityException) {
+            AuraLogger.e(LogCategory.ACTION, "SecurityException when launching $appLabel", e)
+            ActionResult.Failure("Sir, permission was denied to open $appLabel.")
         } catch (e: Exception) {
-            AuraLogger.e(LogCategory.ACTION, "Failed to launch $packageName", e)
-            ActionResult.Failure("Sir, I was unable to open the application.")
+            AuraLogger.e(LogCategory.ACTION, "Failed to launch $appLabel", e)
+            ActionResult.Failure("Sorry, Sir. I couldn't open $appLabel.")
         }
     }
 
@@ -212,40 +345,49 @@ class AndroidActionExecutor(
 
     private fun placeCall(contact: ContactInfo): ActionResult {
         return try {
+            val pm = context.packageManager
             val hasCallPermission = context.checkSelfPermission(android.Manifest.permission.CALL_PHONE) ==
                     android.content.pm.PackageManager.PERMISSION_GRANTED
             if (!hasCallPermission) {
-                // Fallback: open dialer without auto-dial (no phone number logged)
                 AuraLogger.i(LogCategory.ACTION, "CALL_PHONE permission not granted, opening dialer")
                 val intent = Intent(Intent.ACTION_DIAL).apply {
                     data = android.net.Uri.parse("tel:${contact.phoneNumber}")
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
+                if (intent.resolveActivity(pm) == null) {
+                    return ActionResult.Failure("Sorry, Sir. No phone dialer is available on this device.")
+                }
                 context.startActivity(intent)
-                return ActionResult.Success("Opening dialer for ${contact.name}, sir.")
+                return ActionResult.Success("Opening dialer for ${contact.name}, Sir.")
             }
             val intent = Intent(Intent.ACTION_CALL).apply {
                 data = android.net.Uri.parse("tel:${contact.phoneNumber}")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            if (intent.resolveActivity(pm) == null) {
+                return ActionResult.Failure("Sorry, Sir. I couldn't place the call to ${contact.name}.")
+            }
             context.startActivity(intent)
-            // NOTE: phone number is NOT logged — only contact name
-            ActionResult.Success("Calling ${contact.name}, sir.")
+            ActionResult.Success("Calling ${contact.name}, Sir.")
         } catch (e: Exception) {
             AuraLogger.e(LogCategory.ACTION, "Failed to place call to ${contact.name}", e)
-            ActionResult.Failure("Sir, I couldn't place the call.")
+            ActionResult.Failure("Sorry, Sir. I couldn't place the call to ${contact.name}.")
         }
     }
 
     private fun handleCallByNumber(phoneNumber: String): ActionResult {
         if (phoneNumber.isBlank()) return ActionResult.Failure("Sir, the phone number is blank.")
         return try {
+            val pm = context.packageManager
             val intent = Intent(Intent.ACTION_DIAL).apply {
                 data = android.net.Uri.parse("tel:$phoneNumber")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            if (intent.resolveActivity(pm) == null) {
+                return ActionResult.Failure("Sorry, Sir. No phone dialer is available on this device.")
+            }
             context.startActivity(intent)
-            ActionResult.Success("Opening dialer, sir.")
+            ActionResult.Success("Opening dialer, Sir.")
         } catch (e: Exception) {
             AuraLogger.e(LogCategory.ACTION, "Failed to open dialer", e)
             ActionResult.Failure("Sir, I could not open the phone dialer.")
@@ -275,14 +417,17 @@ class AndroidActionExecutor(
 
     private fun openSmsComposer(contact: ContactInfo, message: String): ActionResult {
         return try {
+            val pm = context.packageManager
             val intent = Intent(Intent.ACTION_SENDTO).apply {
                 data = android.net.Uri.parse("smsto:${contact.phoneNumber}")
                 putExtra("sms_body", message)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            if (intent.resolveActivity(pm) == null) {
+                return ActionResult.Failure("Sorry, Sir. No SMS application is available on this device.")
+            }
             context.startActivity(intent)
-            // NOTE: phone number not logged — only contact name
-            ActionResult.Success("Opening message composer for ${contact.name}, sir.")
+            ActionResult.Success("Opening message composer for ${contact.name}, Sir.")
         } catch (e: Exception) {
             AuraLogger.e(LogCategory.ACTION, "Failed to open SMS composer for ${contact.name}", e)
             ActionResult.Failure("Sir, I couldn't open the message composer.")
@@ -292,13 +437,17 @@ class AndroidActionExecutor(
     private fun handleSmsToNumber(phoneNumber: String, message: String): ActionResult {
         if (phoneNumber.isBlank()) return ActionResult.Failure("Sir, the phone number is blank.")
         return try {
+            val pm = context.packageManager
             val intent = Intent(Intent.ACTION_SENDTO).apply {
                 data = android.net.Uri.parse("smsto:$phoneNumber")
                 putExtra("sms_body", message)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            if (intent.resolveActivity(pm) == null) {
+                return ActionResult.Failure("Sorry, Sir. No SMS application is available on this device.")
+            }
             context.startActivity(intent)
-            ActionResult.Success("Opening SMS composer, sir.")
+            ActionResult.Success("Opening SMS composer, Sir.")
         } catch (e: Exception) {
             AuraLogger.e(LogCategory.ACTION, "Failed to open SMS composer", e)
             ActionResult.Failure("Sir, I couldn't open the SMS composer.")
@@ -332,8 +481,7 @@ class AndroidActionExecutor(
                     }
                     if (whatsappIntent.resolveActivity(context.packageManager) != null) {
                         context.startActivity(whatsappIntent)
-                        // NOTE: phone number NOT in success message — only contact name
-                        ActionResult.Success("Opening WhatsApp conversation with ${contact.name}, sir. The message is pre-filled.")
+                        ActionResult.Success("Opening WhatsApp conversation with ${contact.name}, Sir. The message is pre-filled.")
                     } else {
                         ActionResult.Failure("Sir, WhatsApp doesn't appear to be installed on this device.")
                     }
@@ -352,6 +500,7 @@ class AndroidActionExecutor(
             return ActionResult.Failure("Sir, $hour:$minute is not a valid time.")
         }
         return try {
+            val pm = context.packageManager
             val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
                 putExtra(AlarmClock.EXTRA_HOUR, hour)
                 putExtra(AlarmClock.EXTRA_MINUTES, minute)
@@ -359,9 +508,12 @@ class AndroidActionExecutor(
                 putExtra(AlarmClock.EXTRA_SKIP_UI, true)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            if (intent.resolveActivity(pm) == null) {
+                return ActionResult.Failure("Sorry, Sir. No alarm clock application is available.")
+            }
             context.startActivity(intent)
             val displayTime = String.format("%02d:%02d", hour, minute)
-            ActionResult.Success("Alarm set for $displayTime, sir.")
+            ActionResult.Success("Alarm set for $displayTime, Sir.")
         } catch (e: Exception) {
             AuraLogger.e(LogCategory.ACTION, "Failed to set alarm", e)
             ActionResult.Failure("Sir, I was unable to schedule the alarm.")
@@ -377,11 +529,15 @@ class AndroidActionExecutor(
     private fun handleSetTimer(durationSeconds: Long, label: String?): ActionResult {
         if (durationSeconds <= 0) return ActionResult.Failure("Sir, the timer duration must be greater than zero.")
         return try {
+            val pm = context.packageManager
             val intent = Intent(AlarmClock.ACTION_SET_TIMER).apply {
                 putExtra(AlarmClock.EXTRA_LENGTH, durationSeconds.toInt())
                 if (label != null) putExtra(AlarmClock.EXTRA_MESSAGE, label)
                 putExtra(AlarmClock.EXTRA_SKIP_UI, true)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (intent.resolveActivity(pm) == null) {
+                return ActionResult.Failure("Sorry, Sir. No timer application is available.")
             }
             context.startActivity(intent)
             val minutes = durationSeconds / 60
@@ -389,7 +545,7 @@ class AndroidActionExecutor(
             val display = if (minutes > 0 && seconds == 0L) "$minutes minute${if (minutes > 1) "s" else ""}"
                 else if (minutes > 0) "$minutes min $seconds sec"
                 else "$seconds seconds"
-            ActionResult.Success("Timer set for $display, sir.")
+            ActionResult.Success("Timer set for $display, Sir.")
         } catch (e: Exception) {
             AuraLogger.e(LogCategory.ACTION, "Failed to set timer", e)
             ActionResult.Failure("Sir, I was unable to set the timer.")
@@ -473,5 +629,25 @@ class AndroidActionExecutor(
     private fun handleGetCurrentTime(): ActionResult {
         val formattedTime = SimpleDateFormat("h:mm a", Locale.US).format(Date())
         return ActionResult.Success("It is $formattedTime, sir.")
+    }
+
+    private fun handleCameraCapture(autoCapture: Boolean): ActionResult {
+        if (context.checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            AuraLogger.w(LogCategory.ACTION, "[CAMERA] Camera permission is not granted")
+            return ActionResult.Failure("Camera permission is required to capture photos, sir. Please grant it in application settings.")
+        }
+
+        val intent = Intent("co.aura.action.CAMERA_CAPTURE").apply {
+            setPackage(context.packageName)
+            putExtra("EXTRA_AUTO_CAPTURE", autoCapture)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        if (intent.resolveActivity(context.packageManager) == null) {
+            intent.setClassName(context.packageName, "co.aura.android.JarvisCameraActivity")
+        }
+
+        AuraLogger.i(LogCategory.ACTION, "[CAMERA] Initiating in-app camera capture (autoCapture=$autoCapture)")
+        return appLauncher.launchExplicitIntent(intent, "Camera Shutter")
     }
 }

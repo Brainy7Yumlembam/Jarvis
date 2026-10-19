@@ -238,7 +238,7 @@ fun VoiceAssistantScreen(
                                     viewModel.cancelListening()
                                 }
                             }
-                            is VoiceAssistantState.Idle, is VoiceAssistantState.Paused, is VoiceAssistantState.Error -> {
+                            is VoiceAssistantState.Idle, is VoiceAssistantState.Paused, is VoiceAssistantState.Error, is VoiceAssistantState.WakeWordMonitoring -> {
                                 onRequestPermission()
                                 viewModel.startListening()
                             }
@@ -265,6 +265,8 @@ fun VoiceAssistantScreen(
                         is VoiceAssistantState.Listening -> s.partialTranscript
                         is VoiceAssistantState.Processing -> s.userTranscript
                         is VoiceAssistantState.Speaking -> s.aiResponse
+                        is VoiceAssistantState.WakeWordDetected -> "Wake word detected: ${s.wakePhrase}"
+                        is VoiceAssistantState.WakeWordMonitoring -> "Say \"Wake up, JARVIS\""
                         else -> ""
                     }
 
@@ -348,7 +350,7 @@ fun VoiceAssistantScreen(
                                             viewModel.cancelListening()
                                         }
                                     }
-                                    is VoiceAssistantState.Idle, is VoiceAssistantState.Paused, is VoiceAssistantState.Error -> {
+                                    is VoiceAssistantState.Idle, is VoiceAssistantState.Paused, is VoiceAssistantState.Error, is VoiceAssistantState.WakeWordMonitoring -> {
                                         onRequestPermission()
                                         viewModel.startListening()
                                     }

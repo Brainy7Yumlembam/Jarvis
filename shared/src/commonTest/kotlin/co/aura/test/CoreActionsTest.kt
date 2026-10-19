@@ -491,3 +491,93 @@ class ActionFailureTest {
         )
     }}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// APP LAUNCHING AND RESOLUTION TESTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+private class TestAppActionExecutor : ActionExecutor {
+    private val knownApps = setOf("camera", "whatsapp", "youtube", "chrome", "settings")
+
+    override suspend fun executeAction(action: Action): ActionResult {
+        return when (action) {
+            is OpenAppAction -> {
+                val name = action.appName.trim()
+                val lower = name.lowercase()
+                if (knownApps.any { lower.contains(it) || it.contains(lower) }) {
+                    ActionResult.Success("Opening $name, Sir.")
+                } else {
+                    ActionResult.Failure("Sorry, Sir. I couldn't find $name on your device.")
+                }
+            }
+            else -> ActionResult.Success("Done: ${action.actionType}")
+        }
+    }
+}
+
+class AppLaunchingTest {
+
+    @Test fun `open Camera succeeds when executor succeeds`() { runBlocking {
+        val executor = TestAppActionExecutor()
+        val manager = buildManager(
+            aiJson = "{}",
+            executor = executor
+        )
+        val response = manager.processUserMessage("Open Camera")
+        assertTrue(response.contains("Opening Camera", ignoreCase = true), "Expected success response, got: $response")
+    }}
+
+    @Test fun `open WhatsApp succeeds when executor succeeds`() { runBlocking {
+        val executor = TestAppActionExecutor()
+        val manager = buildManager(
+            aiJson = "{}",
+            executor = executor
+        )
+        val response = manager.processUserMessage("Open WhatsApp")
+        assertTrue(response.contains("Opening WhatsApp", ignoreCase = true), "Expected success response, got: $response")
+    }}
+
+    @Test fun `open YouTube succeeds when executor succeeds`() { runBlocking {
+        val executor = TestAppActionExecutor()
+        val manager = buildManager(
+            aiJson = "{}",
+            executor = executor
+        )
+        val response = manager.processUserMessage("Open YouTube")
+        assertTrue(response.contains("Opening YouTube", ignoreCase = true), "Expected success response, got: $response")
+    }}
+
+    @Test fun `open Chrome succeeds when executor succeeds`() { runBlocking {
+        val executor = TestAppActionExecutor()
+        val manager = buildManager(
+            aiJson = "{}",
+            executor = executor
+        )
+        val response = manager.processUserMessage("Open Chrome")
+        assertTrue(response.contains("Opening Chrome", ignoreCase = true), "Expected success response, got: $response")
+    }}
+
+    @Test fun `open Settings succeeds when executor succeeds`() { runBlocking {
+        val executor = TestAppActionExecutor()
+        val manager = buildManager(
+            aiJson = "{}",
+            executor = executor
+        )
+        val response = manager.processUserMessage("Open Settings")
+        assertTrue(response.contains("Opening Settings", ignoreCase = true), "Expected success response, got: $response")
+    }}
+
+    @Test fun `open non-existent app reports failure and does not give false success`() { runBlocking {
+        val executor = TestAppActionExecutor()
+        val manager = buildManager(
+            aiJson = "{}",
+            executor = executor
+        )
+        val response = manager.processUserMessage("Open XYZRandomApp")
+        assertFalse(response.startsWith("Opening XYZRandomApp", ignoreCase = true), "Must NOT report success for non-existent app")
+        assertTrue(
+            response.contains("couldn't find", ignoreCase = true) || response.contains("couldn't open", ignoreCase = true) || response.contains("XYZRandomApp", ignoreCase = true),
+            "Expected failure response, got: $response"
+        )
+    }}
+}

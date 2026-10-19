@@ -159,3 +159,134 @@ data class GenericAction(
     override val actionType: String,
     val parameters: Map<String, String> = emptyMap()
 ) : Action
+
+@Serializable
+enum class SettingsPanel {
+    MAIN,
+    WIFI,
+    BLUETOOTH,
+    LOCATION,
+    DISPLAY,
+    SOUND,
+    BATTERY,
+    APPS,
+    HOTSPOT,
+    NETWORK
+}
+
+@Serializable
+data class OpenSettingsAction(
+    val panel: SettingsPanel = SettingsPanel.MAIN
+) : Action {
+    override val actionType: String = "OPEN_SETTINGS"
+}
+
+@Serializable
+data class OpenUrlAction(
+    val url: String
+) : Action {
+    override val actionType: String = "OPEN_URL"
+}
+
+@Serializable
+data class WebSearchAction(
+    val query: String
+) : Action {
+    override val actionType: String = "WEB_SEARCH"
+}
+
+@Serializable
+data class SendEmailAction(
+    val recipient: String? = null,
+    val subject: String? = null,
+    val body: String? = null
+) : Action {
+    override val actionType: String = "SEND_EMAIL"
+}
+
+@Serializable
+data class ShareTextAction(
+    val text: String,
+    val title: String? = null
+) : Action {
+    override val actionType: String = "SHARE_TEXT"
+}
+
+@Serializable
+data class CopyToClipboardAction(
+    val text: String,
+    val label: String = "JARVIS"
+) : Action {
+    override val actionType: String = "COPY_TO_CLIPBOARD"
+}
+
+@Serializable
+enum class DeviceInfoType {
+    DATE,
+    TIME,
+    BATTERY,
+    CHARGING,
+    ANDROID_VERSION,
+    STORAGE,
+    NETWORK_CONNECTIVITY,
+    WIFI_STATUS,
+    BLUETOOTH_STATUS,
+    FLASHLIGHT_STATUS
+}
+
+@Serializable
+data class GetDeviceInfoAction(
+    val infoType: DeviceInfoType
+) : Action {
+    override val actionType: String = "GET_DEVICE_INFO"
+}
+
+@Serializable
+class MuteVolumeAction : Action {
+    override val actionType: String = "MUTE_VOLUME"
+}
+
+@Serializable
+class ShowVolumePanelAction : Action {
+    override val actionType: String = "SHOW_VOLUME_PANEL"
+}
+
+@Serializable
+enum class NoteOperationType {
+    CREATE,
+    READ_ALL,
+    SEARCH,
+    DELETE
+}
+
+@Serializable
+data class ManageNoteAction(
+    val operation: NoteOperationType,
+    val content: String,
+    val noteId: String? = null
+) : Action {
+    override val actionType: String = "MANAGE_NOTE"
+}
+
+@Serializable
+enum class ReminderOperationType {
+    CREATE,
+    LIST,
+    CANCEL
+}
+
+@Serializable
+data class ManageReminderAction(
+    val operation: ReminderOperationType,
+    val title: String,
+    val timestampMillis: Long? = null
+) : Action {
+    override val actionType: String = "MANAGE_REMINDER"
+}
+
+@Serializable
+data class CameraCaptureAction(
+    val autoCapture: Boolean = true
+) : Action {
+    override val actionType: String = "CAMERA_CAPTURE"
+}

@@ -26,6 +26,7 @@ class MainActivity : ComponentActivity() {
         ) { isGranted ->
             if (isGranted) {
                 JarvisVoiceService.start(this)
+                voiceViewModel.startWakeWordMonitoringIfEnabled()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationPermissionLauncher?.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }
@@ -34,6 +35,7 @@ class MainActivity : ComponentActivity() {
 
         JarvisVoiceService.onStopRequested = {
             voiceViewModel.interruptJarvis()
+            voiceViewModel.stopWakeWordMonitoring()
             voiceViewModel.cancelListening()
         }
 
@@ -43,9 +45,10 @@ class MainActivity : ComponentActivity() {
             })
         }
 
-        // Start the persistent foreground service if audio permission is already present
+        // Start the persistent foreground service and wake word monitoring if audio permission is already present
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
             JarvisVoiceService.start(this)
+            voiceViewModel.startWakeWordMonitoringIfEnabled()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 notificationPermissionLauncher?.launch(Manifest.permission.POST_NOTIFICATIONS)
             }

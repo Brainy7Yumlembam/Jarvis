@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.consumeAsFlow
+import kotlinx.coroutines.channels.awaitClose
 
 open class FakeAIProvider : AIProvider {
     var responseToReturn = "Mock response from fake LLM provider"
@@ -35,38 +36,62 @@ open class FakeAIProvider : AIProvider {
 }
 
 class FakeVoiceRecognizer : VoiceRecognizer {
-    private var eventChannel = kotlinx.coroutines.channels.Channel<co.aura.voice.RecognitionEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-    private var channel = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    private val listeners = mutableListOf<kotlinx.coroutines.channels.ProducerScope<co.aura.voice.RecognitionEvent>>()
+    private val transcriptListeners = mutableListOf<kotlinx.coroutines.channels.ProducerScope<String>>()
     var stopListeningCalled = false
     var cancelCalled = false
 
-    override fun startListeningEvents(): Flow<co.aura.voice.RecognitionEvent> {
-        if (eventChannel.isClosedForSend) {
-            eventChannel = kotlinx.coroutines.channels.Channel(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    override fun startListeningEvents(): Flow<co.aura.voice.RecognitionEvent> = kotlinx.coroutines.flow.callbackFlow {
+        trySend(co.aura.voice.RecognitionEvent.ReadyForSpeech)
+        synchronized(listeners) {
+            listeners.add(this)
         }
-        return eventChannel.consumeAsFlow()
+        awaitClose {
+            synchronized(listeners) {
+                listeners.remove(this)
+            }
+        }
     }
 
-    override fun startListening(): Flow<String> {
-        if (channel.isClosedForSend) {
-            channel = kotlinx.coroutines.channels.Channel(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    override fun startListening(): Flow<String> = kotlinx.coroutines.flow.callbackFlow {
+        synchronized(transcriptListeners) {
+            transcriptListeners.add(this)
         }
-        return channel.consumeAsFlow()
+        awaitClose {
+            synchronized(transcriptListeners) {
+                transcriptListeners.remove(this)
+            }
+        }
+    }
+
+    fun emitReadyForSpeech() {
+        val list = synchronized(listeners) { listeners.toList() }
+        list.forEach { it.trySend(co.aura.voice.RecognitionEvent.ReadyForSpeech) }
     }
 
     fun emitTranscript(text: String) {
-        eventChannel.trySend(co.aura.voice.RecognitionEvent.PartialResult(text))
-        channel.trySend(text)
+        val list = synchronized(listeners) { listeners.toList() }
+        list.forEach { it.trySend(co.aura.voice.RecognitionEvent.PartialResult(text)) }
+        val tList = synchronized(transcriptListeners) { transcriptListeners.toList() }
+        tList.forEach { it.trySend(text) }
     }
 
     fun emitFinalResult(text: String) {
-        eventChannel.trySend(co.aura.voice.RecognitionEvent.FinalResult(text))
-        channel.trySend(text)
+        val list = synchronized(listeners) { listeners.toList() }
+        list.forEach { it.trySend(co.aura.voice.RecognitionEvent.FinalResult(text)) }
+        val tList = synchronized(transcriptListeners) { transcriptListeners.toList() }
+        tList.forEach { it.trySend(text) }
     }
 
     fun completeListening() {
-        eventChannel.close()
-        channel.close()
+        synchronized(listeners) {
+            listeners.toList().forEach { it.close() }
+            listeners.clear()
+        }
+        synchronized(transcriptListeners) {
+            transcriptListeners.toList().forEach { it.close() }
+            transcriptListeners.clear()
+        }
     }
 
     override fun stopListening() {

@@ -76,9 +76,8 @@ class AuraTest {
         assertEquals(VoiceAssistantState.Idle, viewModel.uiState.value)
 
         viewModel.startListening()
-        assertEquals(VoiceAssistantState.Listening(""), viewModel.uiState.value)
-
         testScheduler.runCurrent()
+        assertEquals(VoiceAssistantState.Listening(""), viewModel.uiState.value)
 
         voiceRecognizer.emitTranscript("Show me the weather")
         testScheduler.runCurrent()

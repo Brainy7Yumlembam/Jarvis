@@ -183,6 +183,9 @@ class VoiceBargeInTest {
         // Verify the second turn was processed and spoken
         assertTrue(viewModel.uiState.value is VoiceAssistantState.Speaking)
         assertEquals("Certainly, here is something else.", tts.textSpoken)
+
+        viewModel.interruptJarvis()
+        testScheduler.runCurrent()
     }
 
 
@@ -325,6 +328,9 @@ class VoiceBargeInTest {
         assertTrue(viewModel.uiState.value is VoiceAssistantState.Speaking)
         // Microphone amplitude must be 0f while speaking
         assertEquals(0f, viewModel.visualizerState.value.microphoneAmplitude)
+
+        viewModel.interruptJarvis()
+        testScheduler.runCurrent()
     }
 
     private class SuspendingTtsEngine : TextToSpeechEngine {

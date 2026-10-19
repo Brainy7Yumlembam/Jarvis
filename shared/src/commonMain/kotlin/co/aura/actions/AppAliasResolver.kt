@@ -83,13 +83,17 @@ class AppAliasResolver {
                         normLabel.contains("chrome") || normLabel.contains("browser") || normLabel.contains("firefox") || normLabel.contains("brave") || normLabel.contains("opera") || normLabel.contains("safari") ||
                         normPkg.contains("chrome") || normPkg.contains("browser") || normPkg.contains("firefox") || normPkg.contains("brave") || normPkg.contains("opera") || normPkg.contains("safari") || normPkg.contains("mozilla")
                     )) ||
-                    (key == "youtube" && (normLabel.contains("youtube") || normLabel.contains("yt"))) ||
-                    (key == "whatsapp" && (normLabel.contains("whatsapp") || normLabel.contains("wa"))) ||
-                    (key == "camera" && normLabel.contains("camera")) ||
-                    (key == "gallery" && (normLabel.contains("gallery") || normLabel.contains("photo") || normLabel.contains("picture"))) ||
-                    (key == "music" && (normLabel.contains("music") || normLabel.contains("player"))) ||
-                    (key == "messages" && (normLabel.contains("message") || normLabel.contains("sms") || normLabel.contains("mms"))) ||
-                    (key == "phone" && (normLabel.contains("phone") || normLabel.contains("dialer")))
+                    (key == "youtube" && (normLabel.contains("youtube") || normLabel.contains("yt") || normPkg.contains("youtube"))) ||
+                    (key == "whatsapp" && (normLabel.contains("whatsapp") || normLabel.contains("wa") || normPkg.contains("whatsapp"))) ||
+                    (key == "camera" && (normLabel.contains("camera") || normLabel.contains("cam") || normPkg.contains("camera"))) ||
+                    (key == "settings" && (normLabel.contains("setting") || normPkg.contains("setting"))) ||
+                    (key == "gallery" && (normLabel.contains("gallery") || normLabel.contains("photo") || normLabel.contains("picture") || normPkg.contains("gallery") || normPkg.contains("photo"))) ||
+                    (key == "music" && (normLabel.contains("music") || normLabel.contains("player") || normPkg.contains("music"))) ||
+                    (key == "messages" && (normLabel.contains("message") || normLabel.contains("sms") || normLabel.contains("mms") || normPkg.contains("message") || normPkg.contains("mms"))) ||
+                    (key == "phone" && (normLabel.contains("phone") || normLabel.contains("dialer") || normPkg.contains("phone") || normPkg.contains("dialer"))) ||
+                    (key == "calculator" && (normLabel.contains("calc") || normPkg.contains("calculator"))) ||
+                    (key == "maps" && (normLabel.contains("map") || normPkg.contains("map") || normPkg.contains("navigation"))) ||
+                    (key == "gmail" && (normLabel.contains("gmail") || normLabel.contains("mail") || normPkg.contains("gmail") || normPkg.contains("mail")))
                 }
 
                 isMatched

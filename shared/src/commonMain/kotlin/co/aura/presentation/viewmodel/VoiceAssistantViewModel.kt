@@ -5,6 +5,7 @@ import co.aura.core.logging.AuraLogger
 import co.aura.core.logging.LogCategory
 import co.aura.domain.model.AuraError
 import co.aura.security.PermissionManager
+import co.aura.router.LocalResponseProvider
 import co.aura.voice.AudioVisualizationState
 import co.aura.voice.AudioVisualizerController
 import co.aura.voice.DefaultAudioVisualizerController
@@ -19,6 +20,7 @@ import co.aura.voice.TextToSpeechEngine
 import co.aura.voice.TtsQueuePlayer
 import co.aura.voice.VoiceRecognizer
 import co.aura.voice.VoiceSessionCoordinator
+import co.aura.voice.WakeWordDetector
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -43,6 +45,9 @@ sealed interface VoiceEvent {
     data object Interrupted : VoiceEvent
     data class SpeechRecognized(val text: String) : VoiceEvent
     data class ErrorOccurred(val message: String) : VoiceEvent
+    data object StartWakeWordMonitoring : VoiceEvent
+    data object StopWakeWordMonitoring : VoiceEvent
+    data class WakeWordTriggered(val wakePhrase: String) : VoiceEvent
 }
 
 /**
@@ -80,6 +85,8 @@ sealed interface JarvisVoiceState
 
 sealed interface VoiceAssistantState : JarvisVoiceState {
     data object Idle : VoiceAssistantState
+    data object WakeWordMonitoring : VoiceAssistantState
+    data class WakeWordDetected(val wakePhrase: String) : VoiceAssistantState
     data class Listening(val partialTranscript: String = "") : VoiceAssistantState
     data class Processing(val userTranscript: String) : VoiceAssistantState
     data class Speaking(val userTranscript: String, val aiResponse: String) : VoiceAssistantState
@@ -99,6 +106,7 @@ class VoiceAssistantViewModel(
     private val visualizerController: AudioVisualizerController = DefaultAudioVisualizerController(),
     private val interruptionMonitor: InterruptionMonitor = NoOpInterruptionMonitor(),
     private val defaultContinuousConversation: Boolean = false,
+    private val defaultWakeWordEnabled: Boolean = false,
     private val ttsQueuePlayer: TtsQueuePlayer? = null
 ) : BaseViewModel<VoiceAssistantState, VoiceEvent>(VoiceAssistantState.Idle) {
 
@@ -121,14 +129,15 @@ class VoiceAssistantViewModel(
             onUtteranceEnd = {
                 visualizerController.updateSpeechAmplitude(0f)
             },
-            onPlaybackComplete = {
-                handlePlaybackFinished(activeRequestId)
-            },
             onPlaybackCompleteWithId = { finishedReqId ->
                 handlePlaybackFinished(finishedReqId)
             }
         )
     }
+
+    @Volatile
+    private var activeRecoveryId: Long = 0L
+    private var recoveryJob: Job? = null
 
     private var listeningJob: Job? = null
     private var activeAiStreamJob: Job? = null
@@ -146,6 +155,16 @@ class VoiceAssistantViewModel(
     @Volatile
     private var lastProcessedTimestamp: Long = 0L
 
+    init {
+        VoiceSessionCoordinator.onWakeWordToggled = { enabled ->
+            if (enabled) {
+                startWakeWordMonitoring()
+            } else {
+                stopWakeWordMonitoring()
+            }
+        }
+    }
+
     override fun onEvent(event: VoiceEvent) {
         when (event) {
             is VoiceEvent.StartListening -> startListening()
@@ -161,6 +180,9 @@ class VoiceAssistantViewModel(
             is VoiceEvent.ErrorOccurred -> {
                 updateState { VoiceAssistantState.Error(event.message) }
             }
+            is VoiceEvent.StartWakeWordMonitoring -> startWakeWordMonitoring()
+            is VoiceEvent.StopWakeWordMonitoring -> stopWakeWordMonitoring()
+            is VoiceEvent.WakeWordTriggered -> triggerWakeUp(event.wakePhrase)
         }
     }
 
@@ -170,16 +192,22 @@ class VoiceAssistantViewModel(
      * Safe: Does not start normal listening if currently speaking or processing.
      */
     fun startListening() {
+        startListeningInternal(forceRestart = false, recoveryId = null)
+    }
+
+    private fun startListeningInternal(forceRestart: Boolean = false, recoveryId: Long? = null) {
         val currentState = uiState.value
 
-        // Guard against starting normal listening while busy
-        if (currentState is VoiceAssistantState.Speaking) {
-            AuraLogger.d(LogCategory.VOICE, "[JARVIS] Ignoring startListening: assistant is currently SPEAKING")
-            return
-        }
-        if (currentState is VoiceAssistantState.Processing) {
-            AuraLogger.d(LogCategory.VOICE, "[JARVIS] Ignoring startListening: assistant is currently PROCESSING")
-            return
+        if (!forceRestart && recoveryId == null) {
+            // Guard against starting normal listening while busy
+            if (currentState is VoiceAssistantState.Speaking) {
+                AuraLogger.d(LogCategory.VOICE, "[JARVIS] Ignoring startListening: assistant is currently SPEAKING")
+                return
+            }
+            if (currentState is VoiceAssistantState.Processing) {
+                AuraLogger.d(LogCategory.VOICE, "[JARVIS] Ignoring startListening: assistant is currently PROCESSING")
+                return
+            }
         }
         if (currentState is VoiceAssistantState.Listening && listeningJob?.isActive == true) {
             AuraLogger.d(LogCategory.VOICE, "[JARVIS] Already actively listening")
@@ -192,11 +220,13 @@ class VoiceAssistantViewModel(
             return
         }
 
-        AuraLogger.i(LogCategory.VOICE, "[VOICE] STATE transition: ${currentState::class.simpleName ?: "IDLE"} -> LISTENING")
-        AuraLogger.i(LogCategory.VOICE, "[JARVIS] STARTING LISTENING")
+        VoiceSessionCoordinator.isWakeWordMonitoringActive = false
+        VoiceSessionCoordinator.onStatusChanged?.invoke("Active — Listening")
+
+        val tag = if (recoveryId != null) "[RECOVERY recoveryId=$recoveryId]" else "[JARVIS]"
+        AuraLogger.i(LogCategory.VOICE, "$tag listening started")
 
         visualizerController.updateSpeechAmplitude(0f)
-        updateState { VoiceAssistantState.Listening("") }
 
         listeningJob?.cancel()
         listeningJob = launchInScope {
@@ -211,7 +241,8 @@ class VoiceAssistantViewModel(
 
             voiceRecognizer.startListeningEvents()
                 .catch { throwable ->
-                    AuraLogger.e(LogCategory.VOICE, "[JARVIS] Speech recognition error", throwable)
+                    AuraLogger.e(LogCategory.VOICE, "$tag listening failed: ${throwable.message}", throwable)
+                    visualizerController.updateMicrophoneAmplitude(0f)
                     updateState { VoiceAssistantState.Error(throwable.message ?: "Failed to recognize speech.") }
                 }
                 .collect { event ->
@@ -225,7 +256,11 @@ class VoiceAssistantViewModel(
             } else if (lastState is VoiceAssistantState.Listening) {
                 val isContinuous = isContinuousModeEnabled()
                 if (!isContinuous) {
-                    updateState { VoiceAssistantState.Idle }
+                    if (isWakeWordEnabled()) {
+                        startWakeWordMonitoring()
+                    } else {
+                        updateState { VoiceAssistantState.Idle }
+                    }
                 }
             }
         }
@@ -315,16 +350,73 @@ class VoiceAssistantViewModel(
     }
 
     private fun handleRecognitionEvent(event: RecognitionEvent) {
+        val currentState = uiState.value
+
+        // Dedicated Wake-Word Monitoring Mode handling
+        if (currentState is VoiceAssistantState.WakeWordMonitoring) {
+            when (event) {
+                is RecognitionEvent.ReadyForSpeech -> {
+                    AuraLogger.d(LogCategory.VOICE, "[WAKE_WORD] Recognizer ready for wake phrase.")
+                }
+                is RecognitionEvent.SpeechStarted -> {
+                    AuraLogger.d(LogCategory.VOICE, "[WAKE_WORD] Speech detected while monitoring.")
+                }
+                is RecognitionEvent.PartialResult -> {
+                    if (WakeWordDetector.isWakeWord(event.text)) {
+                        AuraLogger.i(LogCategory.VOICE, "[WAKE_WORD] Wake word detected in partial transcript: \"${event.text}\"")
+                        triggerWakeUp(event.text)
+                    }
+                }
+                is RecognitionEvent.SpeechEnded -> {}
+                is RecognitionEvent.FinalResult -> {
+                    if (WakeWordDetector.isWakeWord(event.text)) {
+                        AuraLogger.i(LogCategory.VOICE, "[WAKE_WORD] Wake word detected in final transcript: \"${event.text}\"")
+                        triggerWakeUp(event.text)
+                    } else {
+                        AuraLogger.d(LogCategory.VOICE, "[WAKE_WORD] Ignored non-wake utterance: \"${event.text}\" (0 Gemini tokens)")
+                        // Android SpeechRecognizer stops after onResults. Since this was not a wake word,
+                        // immediately resume wake-word monitoring session after a short debounce delay.
+                        launchInScope {
+                            delay(100L)
+                            if (uiState.value is VoiceAssistantState.WakeWordMonitoring) {
+                                startWakeWordMonitoring(forceRestart = true)
+                            }
+                        }
+                    }
+                }
+                is RecognitionEvent.Error -> {
+                    visualizerController.updateMicrophoneAmplitude(0f)
+                    AuraLogger.d(LogCategory.VOICE, "[WAKE_WORD] Recognizer event error: ${event.message} (recoverable=${event.isRecoverable})")
+                    // Do not die on transient errors in wake-word monitoring mode
+                    launchInScope {
+                        if (isWakeWordEnabled() && uiState.value is VoiceAssistantState.WakeWordMonitoring) {
+                            val delayMs = if (event.isRecoverable) 200L else 800L
+                            delay(delayMs)
+                            if (uiState.value is VoiceAssistantState.WakeWordMonitoring) {
+                                startWakeWordMonitoring(forceRestart = true)
+                            }
+                        }
+                    }
+                }
+            }
+            return
+        }
+
         when (event) {
+            is RecognitionEvent.ReadyForSpeech -> {
+                AuraLogger.i(LogCategory.VOICE, "[VOICE] recognizer ready. STATE transition: ${uiState.value::class.simpleName} -> LISTENING")
+                updateState {
+                    if (it is VoiceAssistantState.Listening) it else VoiceAssistantState.Listening("")
+                }
+            }
             is RecognitionEvent.SpeechStarted -> {
-                // Speech begun; recognizer logged [JARVIS] USER SPEECH STARTED
+                AuraLogger.i(LogCategory.VOICE, "[VOICE] USER SPEECH STARTED")
+                updateState {
+                    if (it is VoiceAssistantState.Listening) it else VoiceAssistantState.Listening("")
+                }
             }
             is RecognitionEvent.PartialResult -> {
-                val currentState = uiState.value
-                // If listening, update the partial transcript display and real-time subtitle
-                if (currentState is VoiceAssistantState.Listening) {
-                    updateState { VoiceAssistantState.Listening(event.text) }
-                }
+                updateState { VoiceAssistantState.Listening(event.text) }
                 updateUserSubtitle(event.text, isFinal = false)
             }
             is RecognitionEvent.SpeechEnded -> {
@@ -333,11 +425,14 @@ class VoiceAssistantViewModel(
             }
             is RecognitionEvent.FinalResult -> {
                 // Authoritative trigger: user finished speaking a command!
+                val utteranceId = event.utteranceId
+                AuraLogger.i(LogCategory.VOICE, "[VOICE] utteranceId=$utteranceId FINAL: \"${event.text}\"")
                 AuraLogger.i(LogCategory.VOICE, "[JARVIS] Final recognition event received: ${event.text}")
                 updateUserSubtitle(event.text, isFinal = true)
-                finishUserSpeech(event.text)
+                finishUserSpeech(event.text, utteranceId)
             }
             is RecognitionEvent.Error -> {
+                visualizerController.updateMicrophoneAmplitude(0f)
                 if (!event.isRecoverable) {
                     AuraLogger.e(LogCategory.VOICE, "[JARVIS] Non-recoverable speech recognizer error: ${event.message}")
                     updateState { VoiceAssistantState.Error(event.message) }
@@ -356,7 +451,7 @@ class VoiceAssistantViewModel(
      * - Active-request guard (no duplicate requests in-flight)
      * - Duplicate callback suppression
      */
-    fun finishUserSpeech(transcript: String? = null) {
+    fun finishUserSpeech(transcript: String? = null, utteranceId: Long = 0L) {
         val currentState = uiState.value
         val textToProcess = transcript?.takeIf { it.isNotBlank() }
             ?: (currentState as? VoiceAssistantState.Listening)?.partialTranscript?.takeIf { it.isNotBlank() }
@@ -372,16 +467,16 @@ class VoiceAssistantViewModel(
             return
         }
 
-        // 2. Duplicate Suppression: Ignore exact duplicate callbacks within 1500ms
-        val now = System.currentTimeMillis()
-        if (trimmed == lastProcessedTranscript && (now - lastProcessedTimestamp) < 1500L) {
-            AuraLogger.w(LogCategory.VOICE, "[JARVIS] Ignoring duplicate final transcript: \"$trimmed\"")
+        // 2. State & Active-Request Guard: Ignore new requests if assistant is already busy processing or speaking
+        if (isRequestInProgress || currentState is VoiceAssistantState.Processing || currentState is VoiceAssistantState.Speaking) {
+            AuraLogger.w(LogCategory.VOICE, "[VOICE] utteranceId=$utteranceId Busy: request in progress (${currentState::class.simpleName}). Ignoring: \"$trimmed\"")
             return
         }
 
-        // 3. Active-Request Guard: Ignore new requests if one is actively in-flight
-        if (isRequestInProgress && activeAiStreamJob?.isActive == true) {
-            AuraLogger.w(LogCategory.VOICE, "[JARVIS] Busy: Gemini request already in-flight. Ignoring: \"$trimmed\"")
+        // 3. Duplicate Suppression: Ignore exact duplicate callbacks within 1500ms
+        val now = System.currentTimeMillis()
+        if (trimmed == lastProcessedTranscript && (now - lastProcessedTimestamp) < 1500L) {
+            AuraLogger.w(LogCategory.VOICE, "[VOICE] utteranceId=$utteranceId Ignoring duplicate final transcript within 1.5s: \"$trimmed\"")
             return
         }
 
@@ -392,7 +487,7 @@ class VoiceAssistantViewModel(
         updateUserSubtitle(trimmed, isFinal = true)
 
         AuraLogger.i(LogCategory.VOICE, "[VOICE] STATE transition: LISTENING -> PROCESSING")
-        AuraLogger.i(LogCategory.VOICE, "[VOICE] Final transcript: $trimmed")
+        AuraLogger.i(LogCategory.VOICE, "[VOICE] utteranceId=$utteranceId Final transcript: $trimmed")
 
         // Stop current listening session cleanly
         voiceRecognizer.stopListening()
@@ -401,7 +496,7 @@ class VoiceAssistantViewModel(
         visualizerController.updateMicrophoneAmplitude(0f)
 
         launchInScope {
-            processQuery(trimmed)
+            processQuery(trimmed, utteranceId)
         }
     }
 
@@ -427,7 +522,13 @@ class VoiceAssistantViewModel(
         listeningJob?.cancel()
         listeningJob = null
         visualizerController.updateMicrophoneAmplitude(0f)
-        updateState { VoiceAssistantState.Idle }
+        launchInScope {
+            if (isWakeWordEnabled()) {
+                startWakeWordMonitoring()
+            } else {
+                updateState { VoiceAssistantState.Idle }
+            }
+        }
     }
 
     /**
@@ -463,18 +564,13 @@ class VoiceAssistantViewModel(
         stopSpeakingCadenceAndInterruption()
         handleInterruptionInSubtitles()
 
-        // 4. Cancel prior listening job before starting a new one to prevent duplicates
+        // 4. Cancel prior listening job and recognizer cleanly before starting a new one
         listeningJob?.cancel()
         listeningJob = null
-        voiceRecognizer.stopListening()
+        voiceRecognizer.cancel()
 
-        // 5. Immediate state transition to LISTENING
-        AuraLogger.i(LogCategory.VOICE, "[VOICE] STATE transition: ${uiState.value::class.simpleName} -> LISTENING")
-        updateState { VoiceAssistantState.Listening("") }
-
-        // 6. Automatically start listening for follow-up command
-        AuraLogger.i(LogCategory.VOICE, "[JARVIS] STARTING LISTENING")
-        startListening()
+        // 5. Automatically start listening for follow-up command
+        startListeningInternal(forceRestart = true)
     }
 
     /**
@@ -524,13 +620,16 @@ class VoiceAssistantViewModel(
     }
 
     fun recoverVoiceState(friendlyMessage: String? = null) {
+        val recoveryId = ++activeRecoveryId
         val failedId = activeRequestId
         activeRequestId++
         isRequestInProgress = false
 
-        AuraLogger.w(LogCategory.AI, "[GEMINI] Recovering voice state from Req #$failedId. New activeRequestId=$activeRequestId")
+        AuraLogger.w(LogCategory.AI, "[RECOVERY] recoveryId=$recoveryId recovery started (from failed Req #$failedId). activeRequestId=$activeRequestId")
         AuraLogger.i(LogCategory.AI, "[GEMINI] Cancelling active stream")
         AuraLogger.i(LogCategory.AI, "[GEMINI] Clearing TTS queue")
+
+        recoveryJob?.cancel()
 
         player.stopAndClear()
         ttsEngine.stop()
@@ -549,14 +648,30 @@ class VoiceAssistantViewModel(
 
         listeningJob?.cancel()
         listeningJob = null
-        voiceRecognizer.stopListening()
+        AuraLogger.i(LogCategory.VOICE, "[RECOVERY] recoveryId=$recoveryId recognizer stopped/cancelled")
+        voiceRecognizer.cancel()
 
-        AuraLogger.i(LogCategory.AI, "[GEMINI] Recovering voice state")
-        AuraLogger.i(LogCategory.AI, "[GEMINI] State -> LISTENING")
-        AuraLogger.i(LogCategory.VOICE, "[VOICE] STATE transition: ${uiState.value::class.simpleName} -> LISTENING")
-        updateState { VoiceAssistantState.Listening("") }
+        recoveryJob = launchInScope {
+            try {
+                // Controlled delay for Android IPC / SpeechRecognizer binder teardown to complete
+                delay(200L)
 
-        startListening()
+                if (recoveryId != activeRecoveryId) {
+                    AuraLogger.w(LogCategory.AI, "[RECOVERY] recoveryId=$recoveryId superseded by $activeRecoveryId before restart")
+                    return@launchInScope
+                }
+
+                AuraLogger.i(LogCategory.VOICE, "[RECOVERY] recoveryId=$recoveryId listening starting...")
+                startListeningInternal(forceRestart = true, recoveryId = recoveryId)
+                AuraLogger.i(LogCategory.AI, "[RECOVERY] recoveryId=$recoveryId recovery completed")
+            } catch (e: CancellationException) {
+                AuraLogger.d(LogCategory.AI, "[RECOVERY] recoveryId=$recoveryId cancelled")
+                throw e
+            } catch (e: Exception) {
+                AuraLogger.e(LogCategory.VOICE, "[RECOVERY] recoveryId=$recoveryId listening failed: ${e.message}", e)
+                updateState { VoiceAssistantState.Error(e.message ?: "Failed to recover voice listening.") }
+            }
+        }
     }
 
     private suspend fun handleProcessingError(error: Throwable, userQuery: String, failedRequestId: Long) {
@@ -604,9 +719,10 @@ class VoiceAssistantViewModel(
         }
     }
 
-    private suspend fun processQuery(text: String) {
+    private suspend fun processQuery(text: String, utteranceId: Long = 0L) {
         val requestId = ++activeRequestId
         isRequestInProgress = true
+        AuraLogger.i(LogCategory.AI, "[LLM] utteranceId=$utteranceId requestId=$requestId START: \"$text\"")
         AuraLogger.i(LogCategory.AI, "[AI] Request START id=$requestId query=\"$text\"")
 
         visualizerController.updateMicrophoneAmplitude(0f)
@@ -673,6 +789,7 @@ class VoiceAssistantViewModel(
                     AuraLogger.w(LogCategory.AI, "[AI] Stale Exception ignored for Req #$requestId")
                 }
             } finally {
+                AuraLogger.i(LogCategory.AI, "[LLM] utteranceId=$utteranceId requestId=$requestId END")
                 AuraLogger.i(LogCategory.AI, "[AI] Request END id=$requestId")
             }
         }
@@ -694,11 +811,13 @@ class VoiceAssistantViewModel(
             }
 
             val isContinuous = isContinuousModeEnabled()
+            val isWakeWord = isWakeWordEnabled()
             if (isContinuous && (uiState.value is VoiceAssistantState.Speaking || uiState.value is VoiceAssistantState.Processing)) {
-                AuraLogger.i(LogCategory.VOICE, "[VOICE] STATE transition: ${uiState.value::class.simpleName} -> LISTENING")
                 AuraLogger.i(LogCategory.VOICE, "[JARVIS] TTS completed normally. Automatically returning to continuous LISTENING.")
-                updateState { VoiceAssistantState.Listening("") }
-                startListening()
+                startListeningInternal(forceRestart = true)
+            } else if (isWakeWord && (uiState.value is VoiceAssistantState.Speaking || uiState.value is VoiceAssistantState.Processing)) {
+                AuraLogger.i(LogCategory.VOICE, "[JARVIS] TTS completed normally. Returning to WAKE WORD MONITORING.")
+                startWakeWordMonitoring()
             } else if (uiState.value is VoiceAssistantState.Speaking || uiState.value is VoiceAssistantState.Processing) {
                 AuraLogger.i(LogCategory.VOICE, "[VOICE] STATE transition: ${uiState.value::class.simpleName} -> IDLE")
                 updateState { VoiceAssistantState.Idle }
@@ -743,6 +862,125 @@ class VoiceAssistantViewModel(
         }
     }
 
+    suspend fun isWakeWordEnabled(): Boolean {
+        return try {
+            val token = securityManager.getSecureToken("wake_word_enabled")
+            if (token != null) {
+                token == "true"
+            } else {
+                defaultWakeWordEnabled
+            }
+        } catch (e: Exception) {
+            defaultWakeWordEnabled
+        }
+    }
+
+    fun startWakeWordMonitoringIfEnabled() {
+        launchInScope {
+            if (isWakeWordEnabled()) {
+                startWakeWordMonitoring()
+            }
+        }
+    }
+
+    fun startWakeWordMonitoring(forceRestart: Boolean = false) {
+        val currentState = uiState.value
+        if (!forceRestart) {
+            if (currentState is VoiceAssistantState.Speaking || currentState is VoiceAssistantState.Processing) {
+                AuraLogger.d(LogCategory.VOICE, "[WAKE_WORD] Ignoring startWakeWordMonitoring: assistant is busy")
+                return
+            }
+            if (currentState is VoiceAssistantState.WakeWordMonitoring && listeningJob?.isActive == true) {
+                AuraLogger.d(LogCategory.VOICE, "[WAKE_WORD] Already monitoring for wake word")
+                return
+            }
+        }
+        if (!permissionManager.hasPermission("android.permission.RECORD_AUDIO")) {
+            AuraLogger.w(LogCategory.VOICE, "[WAKE_WORD] Audio permission not available for wake word monitoring")
+            return
+        }
+
+        AuraLogger.i(LogCategory.VOICE, "[WAKE_WORD] Starting wake-word monitoring session (forceRestart=$forceRestart)...")
+        VoiceSessionCoordinator.isWakeWordMonitoringActive = true
+        VoiceSessionCoordinator.onStatusChanged?.invoke("Listening for 'Wake up, JARVIS'")
+
+        visualizerController.updateSpeechAmplitude(0f)
+        updateState { VoiceAssistantState.WakeWordMonitoring }
+
+        listeningJob?.cancel()
+        if (forceRestart) {
+            voiceRecognizer.cancel()
+        }
+        listeningJob = launchInScope {
+            voiceRecognizer.startListeningEvents()
+                .catch { throwable ->
+                    AuraLogger.e(LogCategory.VOICE, "[WAKE_WORD] Wake-word listening flow error: ${throwable.message}", throwable)
+                    if (isActive && isWakeWordEnabled()) {
+                        delay(500L)
+                        startWakeWordMonitoring(forceRestart = true)
+                    }
+                }
+                .collect { event ->
+                    handleRecognitionEvent(event)
+                }
+
+            if (uiState.value is VoiceAssistantState.WakeWordMonitoring && isActive) {
+                if (isWakeWordEnabled()) {
+                    delay(300L)
+                    startWakeWordMonitoring(forceRestart = true)
+                } else {
+                    updateState { VoiceAssistantState.Idle }
+                }
+            }
+        }
+    }
+
+    fun stopWakeWordMonitoring() {
+        AuraLogger.i(LogCategory.VOICE, "[WAKE_WORD] Stopping wake word monitoring...")
+        VoiceSessionCoordinator.isWakeWordMonitoringActive = false
+        VoiceSessionCoordinator.onStatusChanged?.invoke("Standby")
+        voiceRecognizer.stopListening()
+        listeningJob?.cancel()
+        listeningJob = null
+        visualizerController.updateMicrophoneAmplitude(0f)
+        if (uiState.value is VoiceAssistantState.WakeWordMonitoring) {
+            updateState { VoiceAssistantState.Idle }
+        }
+    }
+
+    fun triggerWakeUp(wakePhrase: String) {
+        AuraLogger.i(LogCategory.VOICE, "[WAKE_WORD] Wake phrase confirmed: \"$wakePhrase\"")
+        // Stop/pause microphone recognition immediately before greeting to prevent acoustic self-triggering
+        voiceRecognizer.stopListening()
+        listeningJob?.cancel()
+        listeningJob = null
+        visualizerController.updateMicrophoneAmplitude(0f)
+
+        updateState { VoiceAssistantState.WakeWordDetected(wakePhrase) }
+
+        val trailingCommand = WakeWordDetector.extractCommandAfterWakeWord(wakePhrase)
+        if (!trailingCommand.isNullOrBlank()) {
+            AuraLogger.i(LogCategory.VOICE, "[WAKE_WORD] Trailing command found with wake phrase: \"$trailingCommand\". Executing directly.")
+            updateUserSubtitle(trailingCommand, isFinal = true)
+            launchInScope {
+                processQuery(trailingCommand)
+            }
+            return
+        }
+
+        val greeting = LocalResponseProvider.wakeGreeting()
+        AuraLogger.i(LogCategory.VOICE, "[WAKE_WORD] Playing wake greeting: \"$greeting\"")
+        updateJarvisSubtitle(greeting, isComplete = true)
+        updateState { VoiceAssistantState.Speaking(wakePhrase, greeting) }
+
+        launchInScope {
+            ttsEngine.speak(greeting)
+            AuraLogger.i(LogCategory.VOICE, "[WAKE_WORD] Greeting complete. Transitioning to active command listening.")
+            updateState { VoiceAssistantState.Listening("") }
+            startListeningInternal(forceRestart = true)
+        }
+    }
+
     fun onPause() {
         AuraLogger.i(LogCategory.VOICE, "[JARVIS] Lifecycle onPause: checking background voice persistence...")
 
@@ -752,6 +990,7 @@ class VoiceAssistantViewModel(
             return
         }
 
+        recoveryJob?.cancel()
         voiceRecognizer.cancel()
         listeningJob?.cancel()
         listeningJob = null
@@ -761,7 +1000,8 @@ class VoiceAssistantViewModel(
         val lastState = uiState.value
         if (lastState is VoiceAssistantState.Listening ||
             lastState is VoiceAssistantState.Processing ||
-            lastState is VoiceAssistantState.Speaking
+            lastState is VoiceAssistantState.Speaking ||
+            lastState is VoiceAssistantState.WakeWordMonitoring
         ) {
             updateState { VoiceAssistantState.Paused }
         }
@@ -771,10 +1011,14 @@ class VoiceAssistantViewModel(
         AuraLogger.i(LogCategory.VOICE, "[JARVIS] Lifecycle onResume: checking state restoration...")
         val lastState = uiState.value
         if (lastState is VoiceAssistantState.Paused) {
-            updateState { VoiceAssistantState.Idle }
             launchInScope {
                 if (isContinuousModeEnabled()) {
+                    updateState { VoiceAssistantState.Idle }
                     startListening()
+                } else if (isWakeWordEnabled()) {
+                    startWakeWordMonitoring()
+                } else {
+                    updateState { VoiceAssistantState.Idle }
                 }
             }
         }
@@ -782,6 +1026,8 @@ class VoiceAssistantViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        VoiceSessionCoordinator.onWakeWordToggled = null
+        recoveryJob?.cancel()
         cancelListening()
         stopSpeakingInternal()
     }

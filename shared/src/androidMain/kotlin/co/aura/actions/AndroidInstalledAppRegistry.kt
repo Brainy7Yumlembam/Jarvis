@@ -46,6 +46,31 @@ class AndroidInstalledAppRegistry(
                 }
             }
 
+            // 1b. Discover standard system apps via category & media intents
+            val systemIntents = listOf(
+                Intent(android.provider.MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA),
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_BROWSER),
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_GALLERY),
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_MUSIC),
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_MESSAGING),
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_CALCULATOR),
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_MAPS),
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_EMAIL)
+            )
+            for (sysIntent in systemIntents) {
+                val sysInfos = pm.queryIntentActivities(sysIntent, 0)
+                for (info in sysInfos) {
+                    val label = info.loadLabel(pm).toString()
+                    val packageName = info.activityInfo.packageName
+                    if (label.isNotBlank() && packageName.isNotBlank()) {
+                        if (!appLabelMap.containsKey(packageName)) {
+                            appLabelMap[packageName] = label
+                        }
+                        appCapabilityMap.getOrPut(packageName) { mutableSetOf() }.add(AppCapability.LAUNCH)
+                    }
+                }
+            }
+
             // 2. Discover apps capable of media search & play (MEDIA_SEARCH / MEDIA_PLAY)
             val mediaSearchIntent = Intent("android.media.action.MEDIA_PLAY_FROM_SEARCH")
             val mediaSearchInfos = pm.queryIntentActivities(mediaSearchIntent, 0)

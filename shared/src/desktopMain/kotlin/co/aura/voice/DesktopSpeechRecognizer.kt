@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.flow
 
 class DesktopSpeechRecognizer : VoiceRecognizer {
     override fun startListeningEvents(): Flow<RecognitionEvent> = flow {
+        emit(RecognitionEvent.ReadyForSpeech)
         emit(RecognitionEvent.SpeechStarted)
         emit(RecognitionEvent.PartialResult("Desktop mocked transcript speech"))
         emit(RecognitionEvent.SpeechEnded)

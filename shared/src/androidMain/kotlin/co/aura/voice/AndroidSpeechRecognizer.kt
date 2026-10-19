@@ -95,10 +95,21 @@ class AndroidSpeechRecognizer(
     @Volatile
     private var lastPartialTranscript = ""
 
+    private var activeSessionId: Long = 0L
+    private var utteranceCounter: Long = 0L
+    private var pendingRestartRunnable: Runnable? = null
+
     private fun setInternalState(state: RecognitionState) {
         if (_recognitionState.value != state) {
-            AuraLogger.d(LogCategory.VOICE, "[JARVIS] SpeechRecognizer state: ${_recognitionState.value} -> $state")
+            AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$activeSessionId State: ${_recognitionState.value} -> $state")
             _recognitionState.value = state
+        }
+    }
+
+    private fun cancelPendingRestart() {
+        pendingRestartRunnable?.let {
+            mainHandler.removeCallbacks(it)
+            pendingRestartRunnable = null
         }
     }
 
@@ -108,6 +119,7 @@ class AndroidSpeechRecognizer(
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
     }
 
@@ -115,45 +127,47 @@ class AndroidSpeechRecognizer(
         val current = speechRecognizer
         if (current != null) return current
 
+        AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$activeSessionId recognizer recreated")
         val newRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
         speechRecognizer = newRecognizer
         return newRecognizer
     }
 
     override fun startListeningEvents(): Flow<RecognitionEvent> = callbackFlow {
+        val sessionId = ++activeSessionId
         isListeningRequested = true
         lastPartialTranscript = ""
+        cancelPendingRestart()
         setInternalState(RecognitionState.LISTENING)
 
+        AuraLogger.i(LogCategory.VOICE, "[VOICE] session=$sessionId startListeningEvents requested")
+
         val intent = createRecognizerIntent()
-        var isRestartScheduled = false
         var consecutiveClientErrors = 0
 
         fun scheduleRestart(delayMs: Long = 150L) {
-            if (!isListeningRequested || isRestartScheduled) return
-            isRestartScheduled = true
-            mainHandler.postDelayed({
-                isRestartScheduled = false
-                if (isListeningRequested && _recognitionState.value != RecognitionState.PROCESSING) {
+            if (!isListeningRequested || sessionId != activeSessionId) return
+            cancelPendingRestart()
+
+            val runnable = Runnable {
+                pendingRestartRunnable = null
+                if (isListeningRequested && sessionId == activeSessionId) {
                     try {
+                        setInternalState(RecognitionState.LISTENING)
                         val recognizer = ensureRecognizer()
                         muteEarconStreams()
-                        mainHandler.postDelayed({
-                            if (isListeningRequested && _recognitionState.value != RecognitionState.PROCESSING) {
-                                try {
-                                    recognizer.startListening(intent)
-                                } catch (e: Exception) {
-                                    restoreEarconStreams()
-                                    AuraLogger.e(LogCategory.VOICE, "[JARVIS] Failed to restart speech recognition", e)
-                                }
-                            }
-                        }, 50L)
+                        AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$sessionId SpeechRecognizer.startListening() executing after delay")
+                        recognizer.startListening(intent)
                     } catch (e: Exception) {
                         restoreEarconStreams()
-                        AuraLogger.e(LogCategory.VOICE, "[JARVIS] Failed to restart speech recognition", e)
+                        AuraLogger.e(LogCategory.VOICE, "[VOICE] session=$sessionId Failed to restart speech recognition", e)
                     }
+                } else {
+                    AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$sessionId Skipping restart: state=${_recognitionState.value}, requested=$isListeningRequested")
                 }
-            }, delayMs)
+            }
+            pendingRestartRunnable = runnable
+            mainHandler.postDelayed(runnable, delayMs)
         }
 
         mainHandler.post {
@@ -161,12 +175,13 @@ class AndroidSpeechRecognizer(
                 val recognizer = ensureRecognizer()
                 recognizer.setRecognitionListener(object : RecognitionListener {
                     override fun onReadyForSpeech(params: Bundle?) {
-                        AuraLogger.d(LogCategory.VOICE, "[JARVIS] Speech recognizer ready for input")
+                        AuraLogger.i(LogCategory.VOICE, "[VOICE] session=$sessionId recognizer ready")
                         consecutiveClientErrors = 0
+                        trySend(RecognitionEvent.ReadyForSpeech)
                     }
 
                     override fun onBeginningOfSpeech() {
-                        AuraLogger.i(LogCategory.VOICE, "[JARVIS] USER SPEECH STARTED")
+                        AuraLogger.i(LogCategory.VOICE, "[VOICE] session=$sessionId USER SPEECH STARTED")
                         consecutiveClientErrors = 0
                         trySend(RecognitionEvent.SpeechStarted)
                     }
@@ -184,18 +199,16 @@ class AndroidSpeechRecognizer(
                         val partialResult = matches?.firstOrNull() ?: ""
                         if (partialResult.isNotBlank()) {
                             lastPartialTranscript = partialResult
-                            AuraLogger.d(LogCategory.VOICE, "[JARVIS] PARTIAL: $partialResult")
+                            AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$sessionId PARTIAL: $partialResult")
                             trySend(RecognitionEvent.PartialResult(partialResult))
                         }
                     }
 
                     override fun onEndOfSpeech() {
-                        AuraLogger.i(LogCategory.VOICE, "[JARVIS] USER SPEECH ENDED")
+                        AuraLogger.i(LogCategory.VOICE, "[VOICE] session=$sessionId USER SPEECH ENDED")
                         _audioAmplitude.value = 0f
-                        // Re-zero streams so the stop earcon ("bloop" / chime) is silenced
                         muteEarconStreams()
                         trySend(RecognitionEvent.SpeechEnded)
-                        // CRITICAL: Keep lastPartialTranscript preserved until onResults
                     }
 
                     override fun onError(error: Int) {
@@ -213,35 +226,37 @@ class AndroidSpeechRecognizer(
                             else -> "Unknown speech recognizer error ($error)"
                         }
 
+                        AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$sessionId onError: code=$error msg=\"$errorMessage\"")
+
                         // Recoverable errors in continuous mode
                         if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                            AuraLogger.d(LogCategory.VOICE, "[JARVIS] Speech timeout or no match: $errorMessage")
-                            if (isListeningRequested && isContinuous && _recognitionState.value == RecognitionState.LISTENING) {
+                            if (isListeningRequested && isContinuous) {
                                 scheduleRestart(100L)
                                 return
                             }
                         } else if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
-                            AuraLogger.w(LogCategory.VOICE, "[JARVIS] Speech recognizer busy, recovering...")
+                            AuraLogger.w(LogCategory.VOICE, "[VOICE] session=$sessionId Recognizer busy, recreating instance...")
                             try {
                                 speechRecognizer?.cancel()
+                                speechRecognizer?.destroy()
                             } catch (e: Exception) {
                                 // Ignore
                             }
-                            if (isListeningRequested && _recognitionState.value == RecognitionState.LISTENING) {
-                                scheduleRestart(250L)
+                            speechRecognizer = null
+                            if (isListeningRequested && isContinuous) {
+                                scheduleRestart(300L)
                                 return
                             }
                         } else if (error == SpeechRecognizer.ERROR_CLIENT) {
                             // Intentional stop protection
                             if (!isListeningRequested) {
-                                AuraLogger.d(LogCategory.VOICE, "[JARVIS] Ignoring ERROR_CLIENT: listening intentionally stopped")
+                                AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$sessionId Ignoring ERROR_CLIENT: listening not actively requested")
                                 restoreEarconStreams()
-                                setInternalState(RecognitionState.IDLE)
                                 return
                             }
 
                             consecutiveClientErrors++
-                            AuraLogger.w(LogCategory.VOICE, "[JARVIS] Speech recognizer ERROR_CLIENT (attempt $consecutiveClientErrors of 3)")
+                            AuraLogger.w(LogCategory.VOICE, "[VOICE] session=$sessionId ERROR_CLIENT (attempt $consecutiveClientErrors of 3)")
 
                             // Destroy stale recognizer instance
                             try {
@@ -253,46 +268,46 @@ class AndroidSpeechRecognizer(
                             speechRecognizer = null
 
                             // Bounded exponential backoff: 300ms, 600ms, 1200ms
-                            if (consecutiveClientErrors <= 3 && isContinuous) {
+                            if (consecutiveClientErrors <= 3 && isContinuous && isListeningRequested) {
                                 val backoffDelay = 300L * (1 shl (consecutiveClientErrors - 1))
                                 scheduleRestart(backoffDelay)
                                 return
                             } else {
-                                AuraLogger.e(LogCategory.VOICE, "[JARVIS] Repeated ERROR_CLIENT ($consecutiveClientErrors). Halting auto-restart.")
+                                AuraLogger.e(LogCategory.VOICE, "[VOICE] session=$sessionId Repeated ERROR_CLIENT ($consecutiveClientErrors). Halting auto-restart.")
                             }
-                        } else {
-                            AuraLogger.e(LogCategory.VOICE, "[JARVIS] Speech recognizer error: $errorMessage")
+                        } else if (error == SpeechRecognizer.ERROR_NETWORK || error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT || error == SpeechRecognizer.ERROR_AUDIO || error == SpeechRecognizer.ERROR_SERVER) {
+                            if (isContinuous && isListeningRequested) {
+                                AuraLogger.w(LogCategory.VOICE, "[VOICE] session=$sessionId Recoverable error $error. Retrying in 800ms...")
+                                scheduleRestart(800L)
+                                return
+                            }
                         }
 
                         restoreEarconStreams()
                         setInternalState(RecognitionState.ERROR)
                         trySend(RecognitionEvent.Error(error, errorMessage, error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT))
 
-                        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS || !isContinuous) {
                             close(Exception(errorMessage))
-                        } else if (!isContinuous) {
-                            close(Exception(errorMessage))
-                        } else if (isListeningRequested) {
-                            scheduleRestart(500L)
                         }
                     }
 
                     override fun onResults(results: Bundle?) {
                         _audioAmplitude.value = 0f
                         consecutiveClientErrors = 0
-                        // Recognition finished: restore user volume before JARVIS speaks
                         restoreEarconStreams()
                         val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         val resultsText = matches?.firstOrNull() ?: ""
                         val finalText = resultsText.takeIf { it.isNotBlank() } ?: lastPartialTranscript
 
-                        AuraLogger.i(LogCategory.VOICE, "[JARVIS] FINAL TRANSCRIPT: $finalText")
-
                         if (finalText.isNotBlank()) {
+                            val utteranceId = ++utteranceCounter
                             setInternalState(RecognitionState.PROCESSING)
-                            trySend(RecognitionEvent.FinalResult(finalText))
+                            cancelPendingRestart()
+                            AuraLogger.i(LogCategory.VOICE, "[VOICE] utteranceId=$utteranceId session=$sessionId FINAL: \"$finalText\"")
+                            trySend(RecognitionEvent.FinalResult(finalText, utteranceId))
                         } else {
-                            // Empty result with no stored partial; restart if still listening
+                            AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$sessionId Empty onResults")
                             if (isListeningRequested && isContinuous) {
                                 scheduleRestart(100L)
                             }
@@ -304,12 +319,13 @@ class AndroidSpeechRecognizer(
 
                 muteEarconStreams()
                 mainHandler.postDelayed({
-                    if (isListeningRequested && _recognitionState.value == RecognitionState.LISTENING) {
+                    if (isListeningRequested && sessionId == activeSessionId && _recognitionState.value == RecognitionState.LISTENING) {
                         try {
+                            AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$sessionId SpeechRecognizer.startListening() initiated")
                             recognizer.startListening(intent)
                         } catch (e: Exception) {
                             restoreEarconStreams()
-                            AuraLogger.e(LogCategory.VOICE, "[JARVIS] Exception starting speech recognizer", e)
+                            AuraLogger.e(LogCategory.VOICE, "[VOICE] session=$sessionId Exception starting speech recognizer", e)
                             setInternalState(RecognitionState.ERROR)
                             close(e)
                         }
@@ -317,18 +333,21 @@ class AndroidSpeechRecognizer(
                 }, 50L)
             } catch (e: Exception) {
                 restoreEarconStreams()
-                AuraLogger.e(LogCategory.VOICE, "[JARVIS] Exception starting speech recognizer", e)
+                AuraLogger.e(LogCategory.VOICE, "[VOICE] session=$sessionId Exception initializing speech recognizer", e)
                 setInternalState(RecognitionState.ERROR)
                 close(e)
             }
         }
 
         awaitClose {
+            AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$sessionId awaitClose: cleaning up")
             isListeningRequested = false
+            cancelPendingRestart()
             _audioAmplitude.value = 0f
             setInternalState(RecognitionState.IDLE)
             mainHandler.post {
                 try {
+                    AuraLogger.d(LogCategory.VOICE, "[VOICE] session=$sessionId SpeechRecognizer.stopListening() / cancel() in awaitClose")
                     speechRecognizer?.stopListening()
                     speechRecognizer?.cancel()
                 } catch (e: Exception) {
@@ -349,7 +368,9 @@ class AndroidSpeechRecognizer(
     }
 
     override fun stopListening() {
+        AuraLogger.i(LogCategory.VOICE, "[VOICE] SpeechRecognizer.stopListening() requested")
         isListeningRequested = false
+        cancelPendingRestart()
         _audioAmplitude.value = 0f
         setInternalState(RecognitionState.STOPPING)
         muteEarconStreams()
@@ -366,7 +387,9 @@ class AndroidSpeechRecognizer(
     }
 
     override fun cancel() {
+        AuraLogger.i(LogCategory.VOICE, "[VOICE] SpeechRecognizer.cancel() requested")
         isListeningRequested = false
+        cancelPendingRestart()
         _audioAmplitude.value = 0f
         setInternalState(RecognitionState.IDLE)
         mainHandler.post {
@@ -374,6 +397,7 @@ class AndroidSpeechRecognizer(
                 speechRecognizer?.cancel()
                 speechRecognizer?.destroy()
                 speechRecognizer = null
+                AuraLogger.d(LogCategory.VOICE, "[VOICE] recognizer stopped/cancelled and destroyed")
             } catch (e: Exception) {
                 // Ignore
             } finally {

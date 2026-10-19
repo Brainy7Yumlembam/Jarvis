@@ -64,6 +64,7 @@ val commonModule = module {
     single<co.aura.voice.SpeechCommandNormalizer> { co.aura.voice.SpeechCommandNormalizer() }
     single<AgentToolRegistry> { AgentToolRegistryImpl() }
     single<JarvisAgent> { JarvisAgentImpl(get(), get(), get(), get()) }
+    single<co.aura.router.LocalNoteManager> { co.aura.router.LocalNoteManager(get()) }
     single<ConversationManager> { ConversationManagerImpl(get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), getOrNull(), getOrNull(), getOrNull(), getOrNull(), getOrNull()) }
     
     // Extension Systems
@@ -92,7 +93,7 @@ val commonModule = module {
     single<SystemControlProvider> { SystemControlProviderImpl() }
     single<VisualIntelligenceProvider> { VisualIntelligenceProviderImpl() }
     
-    factory {
+    single {
         VoiceAssistantViewModel(
             voiceRecognizer = get(),
             ttsEngine = get(),
@@ -102,7 +103,8 @@ val commonModule = module {
             interruptionDetector = getOrNull() ?: co.aura.voice.DefaultInterruptionDetector(),
             visualizerController = getOrNull() ?: co.aura.voice.DefaultAudioVisualizerController(),
             interruptionMonitor = getOrNull() ?: co.aura.voice.NoOpInterruptionMonitor(),
-            defaultContinuousConversation = true
+            defaultContinuousConversation = true,
+            defaultWakeWordEnabled = true
         )
     }
     factory { co.aura.presentation.viewmodel.MemoryViewModel(get()) }

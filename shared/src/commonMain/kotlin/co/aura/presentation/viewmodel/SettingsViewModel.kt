@@ -20,6 +20,7 @@ data class SettingsState(
     val speechRate: Float = 1.0f,
     val pitch: Float = 1.0f,
     val isContinuousConversation: Boolean = false,
+    val isWakeWordEnabled: Boolean = true,
     val aiProviderType: AiProviderType = AiProviderType.GEMINI,
     val geminiCredentials: List<GeminiCredential> = emptyList(),
     val activeGeminiProject: String = "None",
@@ -38,6 +39,7 @@ sealed interface SettingsAction {
     data class UpdateSpeechRate(val rate: Float) : SettingsAction
     data class UpdatePitch(val pitch: Float) : SettingsAction
     data class UpdateContinuousConversation(val enabled: Boolean) : SettingsAction
+    data class UpdateWakeWord(val enabled: Boolean) : SettingsAction
     object SpeakTestVoice : SettingsAction
     data class UpdateAiProvider(val type: AiProviderType) : SettingsAction
     data class SaveProjectCredential(val slot: Int, val label: String, val apiKey: String?, val enabled: Boolean) : SettingsAction
@@ -102,6 +104,7 @@ class SettingsViewModel(
             is SettingsAction.UpdateSpeechRate -> updateSpeechRate(event.rate)
             is SettingsAction.UpdatePitch -> updatePitch(event.pitch)
             is SettingsAction.UpdateContinuousConversation -> updateContinuous(event.enabled)
+            is SettingsAction.UpdateWakeWord -> updateWakeWord(event.enabled)
             is SettingsAction.SpeakTestVoice -> playTestVoice()
             is SettingsAction.UpdateAiProvider -> updateAiProvider(event.type)
             is SettingsAction.SaveProjectCredential -> saveProjectCredential(event.slot, event.label, event.apiKey, event.enabled)
@@ -163,6 +166,7 @@ class SettingsViewModel(
             val rate = securityManager.getSecureToken("voice_speech_rate")?.toFloatOrNull() ?: 1.0f
             val ptch = securityManager.getSecureToken("voice_pitch")?.toFloatOrNull() ?: 1.0f
             val continuous = securityManager.getSecureToken("continuous_conversation") == "true"
+            val wakeWord = securityManager.getSecureToken("wake_word_enabled")?.toBooleanStrictOrNull() ?: true
             val actualVoice = securityManager.getSecureToken("selected_voice_name") ?: "System Default"
             val providerStr = securityManager.getSecureToken("ai_provider_type") ?: "GEMINI"
             val providerType = try {
@@ -182,6 +186,7 @@ class SettingsViewModel(
                     speechRate = rate,
                     pitch = ptch,
                     isContinuousConversation = continuous,
+                    isWakeWordEnabled = wakeWord,
                     actualSelectedVoice = actualVoice,
                     aiProviderType = providerType,
                     selectedConversationMode = mode
@@ -230,6 +235,14 @@ class SettingsViewModel(
         launchInScope {
             securityManager.saveSecureToken("continuous_conversation", enabled.toString())
             updateState { it.copy(isContinuousConversation = enabled) }
+        }
+    }
+
+    private fun updateWakeWord(enabled: Boolean) {
+        launchInScope {
+            securityManager.saveSecureToken("wake_word_enabled", enabled.toString())
+            updateState { it.copy(isWakeWordEnabled = enabled) }
+            co.aura.voice.VoiceSessionCoordinator.onWakeWordToggled?.invoke(enabled)
         }
     }
 

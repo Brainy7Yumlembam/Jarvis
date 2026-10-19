@@ -87,6 +87,9 @@ class JarvisVoiceService : Service() {
         createNotificationChannel()
         isRunning = true
         VoiceSessionCoordinator.isBackgroundPersistenceActive = true
+        VoiceSessionCoordinator.onStatusChanged = { statusText ->
+            updateNotification(statusText)
+        }
         AuraLogger.i(LogCategory.VOICE, "[JARVIS_SERVICE] Foreground voice service created.")
     }
 
@@ -106,7 +109,12 @@ class JarvisVoiceService : Service() {
                 return START_STICKY
             }
             else -> {
-                val notification = buildNotification("Active — Ready & Listening")
+                val initialText = if (VoiceSessionCoordinator.isWakeWordMonitoringActive) {
+                    "Listening for 'Wake up, JARVIS'"
+                } else {
+                    "Active — Ready & Listening"
+                }
+                val notification = buildNotification(initialText)
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         startForeground(
@@ -192,6 +200,8 @@ class JarvisVoiceService : Service() {
     private fun stopServiceCleanly() {
         isRunning = false
         VoiceSessionCoordinator.isBackgroundPersistenceActive = false
+        VoiceSessionCoordinator.isWakeWordMonitoringActive = false
+        VoiceSessionCoordinator.onStatusChanged = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -205,6 +215,8 @@ class JarvisVoiceService : Service() {
     override fun onDestroy() {
         isRunning = false
         VoiceSessionCoordinator.isBackgroundPersistenceActive = false
+        VoiceSessionCoordinator.isWakeWordMonitoringActive = false
+        VoiceSessionCoordinator.onStatusChanged = null
         super.onDestroy()
         AuraLogger.i(LogCategory.VOICE, "[JARVIS_SERVICE] Foreground voice service destroyed.")
     }

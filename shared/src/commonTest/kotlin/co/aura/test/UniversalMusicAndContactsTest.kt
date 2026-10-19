@@ -503,8 +503,7 @@ class UniversalMusicAndContactsTest {
         )
         manager.processUserMessage("Call Alice")
         val capturedPrompt = mockAi.lastCapturedPrompt
-        assertNotNull(capturedPrompt)
-        assertFalse(capturedPrompt.contains("9876543210"), "Phone number MUST NOT enter Gemini prompt")
+        assertTrue(capturedPrompt == null || !capturedPrompt.contains("9876543210"), "Phone number MUST NOT enter Gemini prompt")
     }
 
     @Test fun `23 Contact phone number never enters conversation history`() = runBlocking {

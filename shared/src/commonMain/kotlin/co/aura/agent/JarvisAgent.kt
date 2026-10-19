@@ -143,6 +143,22 @@ class JarvisAgentImpl(
                     return AgentPlanResult.DirectResponse("Taking screenshot, sir.", TakeScreenshotAction())
                 lower == "what is the battery" || lower == "battery level" || lower == "battery percentage" ->
                     return AgentPlanResult.DirectResponse("Checking battery level, sir.", GetBatteryAction())
+
+                lower == "what time is it" || lower == "what is the time" || lower == "what's the time" || lower == "tell me the time" || lower == "current time" || lower == "time" ->
+                    return AgentPlanResult.DirectResponse("Checking current time, sir.", GetCurrentTimeAction())
+                lower.startsWith("open ") || lower.startsWith("launch ") -> {
+                    val appName = if (rawCleaned.startsWith("open ", ignoreCase = true)) {
+                        rawCleaned.substring(5).trim()
+                    } else if (rawCleaned.startsWith("launch ", ignoreCase = true)) {
+                        rawCleaned.substring(7).trim()
+                    } else {
+                        if (lower.startsWith("open ")) lower.removePrefix("open ").trim() else lower.removePrefix("launch ").trim()
+                    }
+                    if (appName.isNotEmpty()) {
+                        return AgentPlanResult.DirectResponse("" +
+                                "Opening $appName, sir.", OpenAppAction(appName))
+                    }
+                }
             }
         }
 

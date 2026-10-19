@@ -793,6 +793,32 @@ fun SettingsScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
+                    // Wake-Word ("Wake up, JARVIS") Switch
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text("Voice Wake-Word (\"Wake up, JARVIS\"):", color = Color.White)
+                            Text(
+                                text = "Activate hands-free via on-device recognition (0 Gemini tokens)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.Gray
+                            )
+                        }
+                        Switch(
+                            checked = state.isWakeWordEnabled,
+                            onCheckedChange = { viewModel.onEvent(SettingsAction.UpdateWakeWord(it)) },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = AuraPrimary,
+                                checkedTrackColor = AuraPrimary.copy(alpha = 0.5f)
+                            )
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     // Conversation Mode Selector
                     Column(
                         modifier = Modifier.fillMaxWidth(),

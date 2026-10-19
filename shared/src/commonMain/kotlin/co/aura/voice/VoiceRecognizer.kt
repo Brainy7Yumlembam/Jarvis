@@ -21,6 +21,11 @@ enum class RecognitionState {
  */
 sealed interface RecognitionEvent {
     /**
+     * Speech recognizer is active, initialized, and ready for user input (onReadyForSpeech).
+     */
+    data object ReadyForSpeech : RecognitionEvent
+
+    /**
      * User began speaking (onBeginningOfSpeech).
      */
     data object SpeechStarted : RecognitionEvent
@@ -38,7 +43,7 @@ sealed interface RecognitionEvent {
     /**
      * Final recognized transcript for the completed utterance (onResults).
      */
-    data class FinalResult(val text: String) : RecognitionEvent
+    data class FinalResult(val text: String, val utteranceId: Long = 0L) : RecognitionEvent
 
     /**
      * An error occurred during recognition.

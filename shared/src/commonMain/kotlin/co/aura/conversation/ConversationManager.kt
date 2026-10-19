@@ -38,6 +38,8 @@ import co.aura.actions.SetTimerAction
 import co.aura.actions.CallAction
 import co.aura.actions.CallContactAction
 import co.aura.actions.SmsAction
+import co.aura.actions.GetBatteryAction
+import co.aura.actions.GetCurrentTimeAction
 import co.aura.actions.SendSmsAction
 import co.aura.actions.SendWhatsAppAction
 import co.aura.actions.PauseMediaAction
@@ -50,6 +52,27 @@ import co.aura.actions.VolumeDownAction
 import co.aura.actions.SetVolumeAction
 import co.aura.actions.ToggleFlashlightAction
 import co.aura.actions.TakeScreenshotAction
+import co.aura.actions.SettingsPanel
+import co.aura.actions.DeviceInfoType
+import co.aura.actions.NoteOperationType
+import co.aura.actions.ReminderOperationType
+import co.aura.actions.OpenSettingsAction
+import co.aura.actions.OpenUrlAction
+import co.aura.actions.WebSearchAction
+import co.aura.actions.SendEmailAction
+import co.aura.actions.ShareTextAction
+import co.aura.actions.CopyToClipboardAction
+import co.aura.actions.GetDeviceInfoAction
+import co.aura.actions.MuteVolumeAction
+import co.aura.actions.ShowVolumePanelAction
+import co.aura.actions.ManageNoteAction
+import co.aura.actions.ManageReminderAction
+import co.aura.actions.CameraCaptureAction
+import co.aura.router.LocalCommandRouter
+import co.aura.router.CommandRoutingResult
+import co.aura.router.LocalCommand
+import co.aura.router.LocalResponseProvider
+import co.aura.ai.TokenUsageTracker
 import co.aura.domain.model.AuraError
 import co.aura.voice.SpeechCommandNormalizer
 import co.aura.security.SecurityManager
@@ -171,6 +194,11 @@ class ConversationManagerImpl(
         data class Sms(val contactName: String, val contact: ContactInfo, val message: String) : PendingConfirmation()
         /** WhatsApp to ${contactName} at [phoneNumber hidden], body = message */
         data class WhatsApp(val contactName: String, val contact: ContactInfo, val message: String) : PendingConfirmation()
+        data class DirectCall(val number: String) : PendingConfirmation()
+        data class DirectSms(val number: String, val message: String) : PendingConfirmation()
+        data class DirectWhatsApp(val contactName: String, val message: String) : PendingConfirmation()
+        data class Email(val emailAction: SendEmailAction) : PendingConfirmation()
+        data class ActionExecution(val action: Action, val description: String) : PendingConfirmation()
     }
     private var pendingConfirmation: PendingConfirmation? = null
     private var pendingConfirmationConsumed = false
@@ -255,23 +283,28 @@ class ConversationManagerImpl(
     }
 
     private fun finalizeResponse(decision: AssistantDecision, actionResults: List<Pair<Action, ActionResult>>): String {
-        if (actionResults.isEmpty()) return decision.response
+        if (actionResults.isEmpty()) {
+            return decision.response.ifBlank { "Action completed, sir." }
+        }
         // Collect all messages; failures/ambiguities interrupt the chain
         val parts = mutableListOf<String>()
         for ((action, result) in actionResults) {
+            val msg = result.message.trim()
+            if (msg.isNotBlank()) {
+                parts.add(msg)
+            }
             when (result) {
-                is ActionResult.Success -> parts.add(result.message)
-                is ActionResult.Ambiguity -> {
-                    parts.add(result.message)
-                    break
-                }
-                is ActionResult.Failure -> {
-                    parts.add(result.message)
-                    break
-                }
+                is ActionResult.Success -> { /* continue sequential chain */ }
+                is ActionResult.Ambiguity -> break
+                is ActionResult.Failure -> break
             }
         }
-        return if (parts.isNotEmpty()) parts.joinToString(" ") else decision.response
+        val combined = parts.joinToString(" ").trim()
+        return when {
+            combined.isNotBlank() -> combined
+            decision.response.isNotBlank() -> decision.response.trim()
+            else -> "Action completed, sir."
+        }
     }
 
     private suspend fun ensureHistoryLoaded() {
@@ -537,6 +570,165 @@ class ConversationManagerImpl(
         }
     }
 
+    private fun mapLocalCommandToAction(command: LocalCommand): Action? {
+        return when (command) {
+            is LocalCommand.LaunchApp -> OpenAppAction(command.appLabel ?: command.appTarget)
+            is LocalCommand.OpenSettings -> if (command.panel == SettingsPanel.MAIN) OpenAppAction("Settings") else OpenSettingsAction(command.panel)
+            is LocalCommand.OpenUrl -> OpenUrlAction(command.url)
+            is LocalCommand.WebSearch -> WebSearchAction(command.query)
+            is LocalCommand.DeviceInfo -> {
+                when (command.type) {
+                    DeviceInfoType.BATTERY -> GetBatteryAction()
+                    DeviceInfoType.TIME -> GetCurrentTimeAction()
+                    else -> GetDeviceInfoAction(command.type)
+                }
+            }
+            is LocalCommand.VolumeControl -> {
+                when {
+                    command.showPanel -> ShowVolumePanelAction()
+                    command.isMute -> MuteVolumeAction()
+                    command.level != null -> SetVolumeAction(command.level)
+                    command.isIncrease == true -> VolumeUpAction()
+                    command.isIncrease == false -> VolumeDownAction()
+                    else -> ShowVolumePanelAction()
+                }
+            }
+            is LocalCommand.TorchControl -> ToggleFlashlightAction(command.enabled)
+            is LocalCommand.MediaControl -> {
+                when (command.command) {
+                    "pause" -> PauseMediaAction()
+                    "resume" -> ResumeMediaAction()
+                    "stop" -> StopMediaAction()
+                    "next", "skip" -> SkipMediaAction()
+                    "previous" -> PreviousMediaAction()
+                    else -> PlayMediaAction(command.query ?: "", command.source)
+                }
+            }
+            is LocalCommand.PhoneCall -> {
+                if (command.contactName != null) CallContactAction(command.contactName)
+                else if (command.number != null) CallAction(command.number)
+                else null
+            }
+            is LocalCommand.SmsMessage -> {
+                if (command.contactName != null) SendSmsAction(command.contactName, command.message)
+                else if (command.number != null) SmsAction(command.number, command.message)
+                else null
+            }
+            is LocalCommand.WhatsAppMessage -> SendWhatsAppAction(command.contactName, command.message)
+            is LocalCommand.SendEmail -> SendEmailAction(command.recipient, command.subject, command.body)
+            is LocalCommand.AlarmControl -> SetAlarmAction(command.hour, command.minute, command.label)
+            is LocalCommand.TimerControl -> SetTimerAction(command.durationSeconds, command.label)
+            is LocalCommand.NoteManage -> ManageNoteAction(command.operation, command.content, command.noteId)
+            is LocalCommand.ReminderManage -> ManageReminderAction(command.operation, command.title, command.timestampMillis)
+            is LocalCommand.ClipboardAction -> CopyToClipboardAction(command.text)
+            is LocalCommand.ShareAction -> ShareTextAction(command.text)
+            is LocalCommand.CameraCapture -> CameraCaptureAction(command.autoCapture)
+            is LocalCommand.Unsupported -> command.fallbackCommand?.let { mapLocalCommandToAction(it) }
+            else -> null
+        }
+    }
+
+    private fun scheduleConfirmationForCommand(command: LocalCommand, prompt: String): String? {
+        return when (command) {
+            is LocalCommand.PhoneCall -> {
+                if (command.number != null) {
+                    pendingConfirmation = PendingConfirmation.DirectCall(command.number)
+                    prompt.ifBlank { "Sir, shall I call ${command.number}? Say yes to confirm or no to cancel." }
+                } else null
+            }
+            is LocalCommand.SmsMessage -> {
+                if (command.number != null) {
+                    pendingConfirmation = PendingConfirmation.DirectSms(command.number, command.message)
+                    prompt.ifBlank { "Sir, shall I send \"${command.message}\" to ${command.number}? Say yes to confirm or no to cancel." }
+                } else null
+            }
+            is LocalCommand.WhatsAppMessage -> null
+            is LocalCommand.SendEmail -> {
+                val emailAction = SendEmailAction(command.recipient, command.subject, command.body)
+                pendingConfirmation = PendingConfirmation.Email(emailAction)
+                prompt.ifBlank { "Sir, shall I prepare an email to ${command.recipient ?: "the recipient"}? Say yes to confirm or no to cancel." }
+            }
+            is LocalCommand.NoteManage -> {
+                if (command.operation == NoteOperationType.DELETE) {
+                    val action = ManageNoteAction(command.operation, command.content, command.noteId)
+                    pendingConfirmation = PendingConfirmation.ActionExecution(action, "deletion of note \"${command.content}\"")
+                    prompt.ifBlank { "Sir, are you sure you want to delete note \"${command.content}\"? Say yes to confirm or no to cancel." }
+                } else null
+            }
+            else -> {
+                val action = mapLocalCommandToAction(command)
+                if (action != null) {
+                    pendingConfirmation = PendingConfirmation.ActionExecution(action, "action")
+                    prompt.ifBlank { "Sir, shall I proceed with this action? Say yes to confirm or no to cancel." }
+                } else null
+            }
+        }
+    }
+
+    private suspend fun executeLocalCommand(command: LocalCommand, rawText: String): String {
+        return when (command) {
+            is LocalCommand.WakeAcknowledgement -> LocalResponseProvider.wakeGreeting()
+            is LocalCommand.VoiceStopOrCancel -> LocalResponseProvider.voiceStop()
+            is LocalCommand.MemoryManage -> {
+                if (command.isRemember) {
+                    val score = memoryManager.scoreMemoryImportance(command.content)
+                    val success = memoryManager.storeMemory(command.content, "PREFERENCE", score)
+                    if (success) "I'll remember that, sir." else "Sorry, sir. I couldn't save that memory."
+                } else if (command.isForget) {
+                    val allMemories = memoryManager.searchMemories("")
+                    val matches = allMemories.filter { it.content.contains(command.content, ignoreCase = true) }
+                    if (matches.isNotEmpty()) {
+                        memoryManager.forgetMemory(matches.first().id)
+                        "I have forgotten: \"${matches.first().content}\", sir."
+                    } else {
+                        "I couldn't find any memory matching: \"${command.content}\", sir."
+                    }
+                } else {
+                    val allMemories = memoryManager.searchMemories("")
+                    if (allMemories.isEmpty()) {
+                        "I don't have any saved memories about you yet, sir."
+                    } else {
+                        "Here is what I remember about you, sir:\n" +
+                                allMemories.take(5).map { "- ${it.content}" }.joinToString("\n")
+                    }
+                }
+            }
+            else -> {
+                val action = mapLocalCommandToAction(command)
+                    ?: return "Sir, that operation is not currently supported."
+
+                val result: ActionResult = when (action) {
+                    is CallContactAction -> resolveAndConfirmContact(action.contactName, "CALL", null)
+                    is SendSmsAction -> resolveAndConfirmContact(action.contactName, "SMS", action.message)
+                    is SendWhatsAppAction -> resolveAndConfirmContact(action.contactName, "WHATSAPP", action.message)
+                    is PlayMediaAction -> handlePlayMediaRequest(action)
+                    else -> actionRouter.routeAction(action)
+                }
+
+                lastActionType = action.actionType
+                when {
+                    action is OpenAppAction && result is ActionResult.Success -> {
+                        lastOpenedApp = action.appName
+                        lastActionStatus = "Success"
+                    }
+                    action is OpenAppAction && result is ActionResult.Failure -> lastActionStatus = "Failure"
+                    else -> lastActionStatus = if (result is ActionResult.Success) "Success" else "Failure"
+                }
+
+                if (result is ActionResult.Ambiguity && action is OpenAppAction) {
+                    pendingResolutionCandidates = result.candidates
+                    pendingResolutionQuery = aliasResolver.getCanonicalKey(action.appName) ?: aliasResolver.normalize(action.appName)
+                }
+
+                when (result) {
+                    is ActionResult.Success -> result.message.ifBlank { "Action completed, sir." }
+                    is ActionResult.Failure -> result.message.ifBlank { "Sir, the action could not be completed." }
+                    is ActionResult.Ambiguity -> result.message.ifBlank { "Sir, please specify which one you prefer." }
+                }
+            }
+        }
+    }
+
 
     override suspend fun processUserMessage(text: String): String {
         ensureHistoryLoaded()
@@ -560,17 +752,37 @@ class ConversationManagerImpl(
                             actionRouter.routeAction(co.aura.actions.SmsAction(confirmation.contact.phoneNumber, confirmation.message))
                         is PendingConfirmation.WhatsApp ->
                             actionRouter.routeAction(co.aura.actions.SendWhatsAppAction(confirmation.contactName, confirmation.message))
+                        is PendingConfirmation.DirectCall ->
+                            actionRouter.routeAction(co.aura.actions.CallAction(confirmation.number))
+                        is PendingConfirmation.DirectSms ->
+                            actionRouter.routeAction(co.aura.actions.SmsAction(confirmation.number, confirmation.message))
+                        is PendingConfirmation.DirectWhatsApp ->
+                            actionRouter.routeAction(co.aura.actions.SendWhatsAppAction(confirmation.contactName, confirmation.message))
+                        is PendingConfirmation.Email ->
+                            actionRouter.routeAction(confirmation.emailAction)
+                        is PendingConfirmation.ActionExecution ->
+                            actionRouter.routeAction(confirmation.action)
                     }
                     lastActionStatus = if (result is ActionResult.Success) "Success" else "Failure"
-                    result.message
+                    val msg = when (result) {
+                        is ActionResult.Success -> if (result.message.isNotBlank()) result.message else "Action completed, sir."
+                        is ActionResult.Failure -> if (result.message.isNotBlank()) result.message else "Sir, the action could not be completed."
+                        is ActionResult.Ambiguity -> result.message
+                    }
+                    msg.ifBlank { "Action completed, sir." }
                 } else {
                     lastActionStatus = "Cancelled"
-                    val name = when (confirmation) {
-                        is PendingConfirmation.Call -> confirmation.contactName
-                        is PendingConfirmation.Sms -> confirmation.contactName
-                        is PendingConfirmation.WhatsApp -> confirmation.contactName
+                    val desc = when (confirmation) {
+                        is PendingConfirmation.Call -> "action for ${confirmation.contactName}"
+                        is PendingConfirmation.Sms -> "message for ${confirmation.contactName}"
+                        is PendingConfirmation.WhatsApp -> "WhatsApp message for ${confirmation.contactName}"
+                        is PendingConfirmation.DirectCall -> "call for ${confirmation.number}"
+                        is PendingConfirmation.DirectSms -> "SMS for ${confirmation.number}"
+                        is PendingConfirmation.DirectWhatsApp -> "WhatsApp message for ${confirmation.contactName}"
+                        is PendingConfirmation.Email -> "email to ${confirmation.emailAction.recipient ?: "recipient"}"
+                        is PendingConfirmation.ActionExecution -> confirmation.description
                     }
-                    "Understood, sir. The action for $name has been cancelled."
+                    "Understood, sir. The $desc has been cancelled."
                 }
                 pendingConfirmationConsumed = false // reset for next confirmation
                 saveMessageAndHistory(text, responseMsg)
@@ -666,6 +878,54 @@ class ConversationManagerImpl(
             }
         }
 
+        // ── 0e. Local-First Command Routing (Zero Token Guarantee) ───────────────
+        var promptForGemini = text
+        when (val localRouting = LocalCommandRouter.route(text)) {
+            is CommandRoutingResult.LocalDirectResponse -> {
+                TokenUsageTracker.recordLocalCommandSaved()
+                saveMessageAndHistory(text, localRouting.responseText)
+                scheduleBackgroundMemoryAndSummarization(text, localRouting.responseText)
+                return localRouting.responseText
+            }
+            is CommandRoutingResult.ClarificationNeeded -> {
+                TokenUsageTracker.recordLocalCommandSaved()
+                saveMessageAndHistory(text, localRouting.prompt)
+                return localRouting.prompt
+            }
+            is CommandRoutingResult.UnsupportedOperation -> {
+                TokenUsageTracker.recordLocalCommandSaved()
+                var fullResponse = localRouting.explanation
+                if (localRouting.fallbackCommand != null) {
+                    val fallbackMsg = executeLocalCommand(localRouting.fallbackCommand, text)
+                    if (fallbackMsg.isNotBlank()) {
+                        fullResponse = "$fullResponse $fallbackMsg"
+                    }
+                }
+                saveMessageAndHistory(text, fullResponse)
+                return fullResponse
+            }
+            is CommandRoutingResult.LocalExecution -> {
+                TokenUsageTracker.recordLocalCommandSaved()
+                if (localRouting.requiresConfirmation) {
+                    val prompt = scheduleConfirmationForCommand(localRouting.command, localRouting.confirmationPrompt)
+                    if (prompt != null) {
+                        saveMessageAndHistory(text, prompt)
+                        return prompt
+                    }
+                }
+                val localResponse = executeLocalCommand(localRouting.command, text)
+                saveMessageAndHistory(text, localResponse)
+                scheduleBackgroundMemoryAndSummarization(text, localResponse)
+                return localResponse
+            }
+            is CommandRoutingResult.RequiresAi -> {
+                if (localRouting.preExecutionCommand != null) {
+                    executeLocalCommand(localRouting.preExecutionCommand, text)
+                }
+                promptForGemini = localRouting.promptForGemini
+            }
+        }
+
         // Extract Dynamic ConversationMode from settings
         val modeStr = securityManager.getSecureToken("conversation_mode") ?: "HYBRID"
         val conversationMode = try {
@@ -681,7 +941,7 @@ class ConversationManagerImpl(
         }
 
         val planResult = agent.plan(
-            userText = text,
+            userText = promptForGemini,
             conversationMode = conversationMode,
             inMemoryHistory = inMemoryHistory,
             recentActionContext = getRecentActionContextString(),
@@ -695,13 +955,25 @@ class ConversationManagerImpl(
                     if (actionValidator.validateAction(action)) {
                         val result = actionRouter.routeAction(action)
                         lastActionType = action.actionType
-                        lastActionStatus = if (result is ActionResult.Success) "Success" else "Failure"
-                        planResult.responseText
+                        when {
+                            action is OpenAppAction && result is ActionResult.Success -> {
+                                lastOpenedApp = action.appName
+                                lastActionStatus = "Success"
+                            }
+                            action is OpenAppAction && result is ActionResult.Failure -> lastActionStatus = "Failure"
+                            else -> lastActionStatus = if (result is ActionResult.Success) "Success" else "Failure"
+                        }
+                        val msg = when (result) {
+                            is ActionResult.Success -> if (result.message.isNotBlank()) result.message else planResult.responseText
+                            is ActionResult.Failure -> if (result.message.isNotBlank()) result.message else "Sir, the action could not be completed."
+                            is ActionResult.Ambiguity -> if (result.message.isNotBlank()) result.message else "Sir, please specify which one you prefer."
+                        }
+                        msg.ifBlank { "Action completed, sir." }
                     } else {
                         "Sir, the requested action is invalid."
                     }
                 } else {
-                    planResult.responseText
+                    planResult.responseText.ifBlank { "Understood, sir." }
                 }
                 saveMessageAndHistory(text, responseMsg)
                 scheduleBackgroundMemoryAndSummarization(text, responseMsg)
@@ -899,17 +1171,37 @@ class ConversationManagerImpl(
                             actionRouter.routeAction(co.aura.actions.SmsAction(confirmation.contact.phoneNumber, confirmation.message))
                         is PendingConfirmation.WhatsApp ->
                             actionRouter.routeAction(co.aura.actions.SendWhatsAppAction(confirmation.contactName, confirmation.message))
+                        is PendingConfirmation.DirectCall ->
+                            actionRouter.routeAction(co.aura.actions.CallAction(confirmation.number))
+                        is PendingConfirmation.DirectSms ->
+                            actionRouter.routeAction(co.aura.actions.SmsAction(confirmation.number, confirmation.message))
+                        is PendingConfirmation.DirectWhatsApp ->
+                            actionRouter.routeAction(co.aura.actions.SendWhatsAppAction(confirmation.contactName, confirmation.message))
+                        is PendingConfirmation.Email ->
+                            actionRouter.routeAction(confirmation.emailAction)
+                        is PendingConfirmation.ActionExecution ->
+                            actionRouter.routeAction(confirmation.action)
                     }
                     lastActionStatus = if (result is ActionResult.Success) "Success" else "Failure"
-                    result.message
+                    val msg = when (result) {
+                        is ActionResult.Success -> if (result.message.isNotBlank()) result.message else "Action completed, sir."
+                        is ActionResult.Failure -> if (result.message.isNotBlank()) result.message else "Sir, the action could not be completed."
+                        is ActionResult.Ambiguity -> result.message
+                    }
+                    msg.ifBlank { "Action completed, sir." }
                 } else {
                     lastActionStatus = "Cancelled"
-                    val name = when (confirmation) {
-                        is PendingConfirmation.Call -> confirmation.contactName
-                        is PendingConfirmation.Sms -> confirmation.contactName
-                        is PendingConfirmation.WhatsApp -> confirmation.contactName
+                    val desc = when (confirmation) {
+                        is PendingConfirmation.Call -> "action for ${confirmation.contactName}"
+                        is PendingConfirmation.Sms -> "message for ${confirmation.contactName}"
+                        is PendingConfirmation.WhatsApp -> "WhatsApp message for ${confirmation.contactName}"
+                        is PendingConfirmation.DirectCall -> "call for ${confirmation.number}"
+                        is PendingConfirmation.DirectSms -> "SMS for ${confirmation.number}"
+                        is PendingConfirmation.DirectWhatsApp -> "WhatsApp message for ${confirmation.contactName}"
+                        is PendingConfirmation.Email -> "email to ${confirmation.emailAction.recipient ?: "recipient"}"
+                        is PendingConfirmation.ActionExecution -> confirmation.description
                     }
-                    "Understood, sir. The action for $name has been cancelled."
+                    "Understood, sir. The $desc has been cancelled."
                 }
                 pendingConfirmationConsumed = false
                 saveMessageAndHistory(text, responseMsg)
@@ -1009,6 +1301,59 @@ class ConversationManagerImpl(
             }
         }
 
+        // ── 0e. Local-First Command Routing (Zero Token Guarantee) ───────────────
+        var promptForGemini = text
+        when (val localRouting = LocalCommandRouter.route(text)) {
+            is CommandRoutingResult.LocalDirectResponse -> {
+                TokenUsageTracker.recordLocalCommandSaved()
+                saveMessageAndHistory(text, localRouting.responseText)
+                scheduleBackgroundMemoryAndSummarization(text, localRouting.responseText)
+                emit(localRouting.responseText)
+                return@flow
+            }
+            is CommandRoutingResult.ClarificationNeeded -> {
+                TokenUsageTracker.recordLocalCommandSaved()
+                saveMessageAndHistory(text, localRouting.prompt)
+                emit(localRouting.prompt)
+                return@flow
+            }
+            is CommandRoutingResult.UnsupportedOperation -> {
+                TokenUsageTracker.recordLocalCommandSaved()
+                var fullResponse = localRouting.explanation
+                if (localRouting.fallbackCommand != null) {
+                    val fallbackMsg = executeLocalCommand(localRouting.fallbackCommand, text)
+                    if (fallbackMsg.isNotBlank()) {
+                        fullResponse = "$fullResponse $fallbackMsg"
+                    }
+                }
+                saveMessageAndHistory(text, fullResponse)
+                emit(fullResponse)
+                return@flow
+            }
+            is CommandRoutingResult.LocalExecution -> {
+                TokenUsageTracker.recordLocalCommandSaved()
+                if (localRouting.requiresConfirmation) {
+                    val prompt = scheduleConfirmationForCommand(localRouting.command, localRouting.confirmationPrompt)
+                    if (prompt != null) {
+                        saveMessageAndHistory(text, prompt)
+                        emit(prompt)
+                        return@flow
+                    }
+                }
+                val localResponse = executeLocalCommand(localRouting.command, text)
+                saveMessageAndHistory(text, localResponse)
+                scheduleBackgroundMemoryAndSummarization(text, localResponse)
+                emit(localResponse)
+                return@flow
+            }
+            is CommandRoutingResult.RequiresAi -> {
+                if (localRouting.preExecutionCommand != null) {
+                    executeLocalCommand(localRouting.preExecutionCommand, text)
+                }
+                promptForGemini = localRouting.promptForGemini
+            }
+        }
+
         val modeStr = securityManager.getSecureToken("conversation_mode") ?: "HYBRID"
         val conversationMode = try {
             ConversationMode.valueOf(modeStr)
@@ -1023,7 +1368,7 @@ class ConversationManagerImpl(
         }
 
         val planResult = agent.plan(
-            userText = text,
+            userText = promptForGemini,
             conversationMode = conversationMode,
             inMemoryHistory = inMemoryHistory,
             recentActionContext = getRecentActionContextString(),
@@ -1037,13 +1382,25 @@ class ConversationManagerImpl(
                     if (actionValidator.validateAction(action)) {
                         val result = actionRouter.routeAction(action)
                         lastActionType = action.actionType
-                        lastActionStatus = if (result is ActionResult.Success) "Success" else "Failure"
-                        planResult.responseText
+                        when {
+                            action is OpenAppAction && result is ActionResult.Success -> {
+                                lastOpenedApp = action.appName
+                                lastActionStatus = "Success"
+                            }
+                            action is OpenAppAction && result is ActionResult.Failure -> lastActionStatus = "Failure"
+                            else -> lastActionStatus = if (result is ActionResult.Success) "Success" else "Failure"
+                        }
+                        val msg = when (result) {
+                            is ActionResult.Success -> if (result.message.isNotBlank()) result.message else planResult.responseText
+                            is ActionResult.Failure -> if (result.message.isNotBlank()) result.message else "Sir, the action could not be completed."
+                            is ActionResult.Ambiguity -> if (result.message.isNotBlank()) result.message else "Sir, please specify which one you prefer."
+                        }
+                        msg.ifBlank { "Action completed, sir." }
                     } else {
                         "Sir, the requested action is invalid."
                     }
                 } else {
-                    planResult.responseText
+                    planResult.responseText.ifBlank { "Understood, sir." }
                 }
                 saveMessageAndHistory(text, responseMsg)
                 scheduleBackgroundMemoryAndSummarization(text, responseMsg)
