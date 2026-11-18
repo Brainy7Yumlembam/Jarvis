@@ -802,7 +802,7 @@ fun SettingsScreen(
                         Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                             Text("Voice Wake-Word (\"Wake up, JARVIS\"):", color = Color.White)
                             Text(
-                                text = "Activate hands-free via on-device recognition (0 Gemini tokens)",
+                                text = "Activate hands-free via on-device recognition, or tap the button to wake up",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color.Gray
                             )

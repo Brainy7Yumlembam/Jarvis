@@ -209,6 +209,80 @@ class WakeWordTest {
         assertTrue(recognizer.stopListeningCalled)
     }
 
+    @Test
+    fun testButtonTapWakeUpPlaysGreetingAndTransitionsToActiveListening() = runTest {
+        val recognizer = FakeVoiceRecognizer()
+        val tts = FakeTextToSpeechEngine()
+        val manager = TrackingConversationManager("Good day, sir.")
+        val permissions = FakePermissionManager()
+        val security = FakeSecurityManager()
+        security.saveSecureToken("wake_word_enabled", "true")
+
+        val viewModel = VoiceAssistantViewModel(
+            recognizer, tts, manager, permissions, security,
+            defaultWakeWordEnabled = true
+        )
+
+        // 1. Assistant starts in Idle / Standby
+        assertTrue(viewModel.uiState.value is VoiceAssistantState.Idle)
+
+        // 2. User taps button to wake up
+        viewModel.wakeUp("Button Tap")
+        testScheduler.runCurrent()
+
+        // 3. Greeting "Yes, sir?" is spoken via TTS
+        assertEquals("Yes, sir?", tts.textSpoken)
+
+        // 4. Automatically transitions into active command listening
+        assertTrue(viewModel.uiState.value is VoiceAssistantState.Listening)
+
+        // 5. User speaks a command
+        recognizer.emitFinalResult("What is the weather today?")
+        testScheduler.runCurrent()
+
+        // 6. Command processed
+        assertEquals(1, manager.processCallCount)
+        assertEquals("What is the weather today?", manager.lastProcessedQuery)
+    }
+
+    @Test
+    fun testDualWakeUpModesBothFunctionSeamlessly() = runTest {
+        val recognizer = FakeVoiceRecognizer()
+        val tts = FakeTextToSpeechEngine()
+        val manager = TrackingConversationManager("Understood, sir.")
+        val permissions = FakePermissionManager()
+        val security = FakeSecurityManager()
+        security.saveSecureToken("wake_word_enabled", "true")
+
+        val viewModel = VoiceAssistantViewModel(
+            recognizer, tts, manager, permissions, security,
+            defaultWakeWordEnabled = true
+        )
+
+        // --- TYPE 1: Hands-free Voice Wake-Up ---
+        viewModel.startWakeWordMonitoring()
+        testScheduler.runCurrent()
+        assertTrue(viewModel.uiState.value is VoiceAssistantState.WakeWordMonitoring)
+
+        // User speaks wake phrase
+        recognizer.emitFinalResult("wake up jarvis")
+        testScheduler.runCurrent()
+        assertEquals("Yes, sir?", tts.textSpoken)
+        assertTrue(viewModel.uiState.value is VoiceAssistantState.Listening)
+
+        // Cancel listening back to monitoring
+        viewModel.cancelListening()
+        testScheduler.runCurrent()
+        assertTrue(viewModel.uiState.value is VoiceAssistantState.WakeWordMonitoring)
+
+        // --- TYPE 2: Button Tap Wake-Up ---
+        tts.textSpoken = null
+        viewModel.wakeUp("Button Tap")
+        testScheduler.runCurrent()
+        assertEquals("Yes, sir?", tts.textSpoken)
+        assertTrue(viewModel.uiState.value is VoiceAssistantState.Listening)
+    }
+
     private class TrackingConversationManager(private val responseToReturn: String) : co.aura.conversation.ConversationManager {
         var processCallCount = 0
         var lastProcessedQuery: String? = null
