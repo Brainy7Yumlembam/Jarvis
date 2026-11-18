@@ -48,6 +48,7 @@ sealed interface VoiceEvent {
     data object StartWakeWordMonitoring : VoiceEvent
     data object StopWakeWordMonitoring : VoiceEvent
     data class WakeWordTriggered(val wakePhrase: String) : VoiceEvent
+    data class WakeUp(val triggerSource: String = "Button Tap") : VoiceEvent
 }
 
 /**
@@ -183,7 +184,39 @@ class VoiceAssistantViewModel(
             is VoiceEvent.StartWakeWordMonitoring -> startWakeWordMonitoring()
             is VoiceEvent.StopWakeWordMonitoring -> stopWakeWordMonitoring()
             is VoiceEvent.WakeWordTriggered -> triggerWakeUp(event.wakePhrase)
+            is VoiceEvent.WakeUp -> wakeUp(event.triggerSource)
         }
+    }
+
+    /**
+     * Wakes up JARVIS.
+     * Supports both wake-up triggers:
+     * 1. Manual button tap (HUD core or screen button)
+     * 2. Hands-free voice wake-word ("Wake up, JARVIS")
+     *
+     * In standby (Idle, WakeWordMonitoring, Paused, Error):
+     * Plays wake greeting ("Yes, sir?"), updates visualizer cadence, and transitions to active listening.
+     */
+    fun wakeUp(wakePhrase: String = "Button Tap") {
+        val currentState = uiState.value
+
+        if (currentState is VoiceAssistantState.Speaking) {
+            interruptJarvis()
+            return
+        }
+        if (currentState is VoiceAssistantState.Listening) {
+            if (currentState.partialTranscript.isNotBlank()) {
+                finishUserSpeech(currentState.partialTranscript)
+            } else {
+                cancelListening()
+            }
+            return
+        }
+        if (currentState is VoiceAssistantState.Processing) {
+            return
+        }
+
+        triggerWakeUp(wakePhrase)
     }
 
     /**
@@ -948,7 +981,7 @@ class VoiceAssistantViewModel(
         }
     }
 
-    fun triggerWakeUp(wakePhrase: String) {
+    fun triggerWakeUp(wakePhrase: String = "Wake up, JARVIS") {
         AuraLogger.i(LogCategory.VOICE, "[WAKE_WORD] Wake phrase confirmed: \"$wakePhrase\"")
         // Stop/pause microphone recognition immediately before greeting to prevent acoustic self-triggering
         voiceRecognizer.stopListening()
@@ -974,7 +1007,14 @@ class VoiceAssistantViewModel(
         updateState { VoiceAssistantState.Speaking(wakePhrase, greeting) }
 
         launchInScope {
-            ttsEngine.speak(greeting)
+            try {
+                startSpeechCadenceSimulation(greeting)
+                ttsEngine.speak(greeting)
+            } catch (e: Exception) {
+                AuraLogger.e(LogCategory.VOICE, "[WAKE_WORD] Greeting speech failed: ${e.message}", e)
+            } finally {
+                visualizerController.updateSpeechAmplitude(0f)
+            }
             AuraLogger.i(LogCategory.VOICE, "[WAKE_WORD] Greeting complete. Transitioning to active command listening.")
             updateState { VoiceAssistantState.Listening("") }
             startListeningInternal(forceRestart = true)

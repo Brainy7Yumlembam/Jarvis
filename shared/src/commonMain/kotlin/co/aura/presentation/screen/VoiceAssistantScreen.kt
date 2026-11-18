@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -75,6 +76,10 @@ fun VoiceAssistantScreen(
 
     // Optional transcript overlay, hidden by default for cinematic immersion
     var showTranscriptOverlay by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        viewModel.startWakeWordMonitoringIfEnabled()
+    }
 
     Box(
         modifier = Modifier
@@ -240,7 +245,7 @@ fun VoiceAssistantScreen(
                             }
                             is VoiceAssistantState.Idle, is VoiceAssistantState.Paused, is VoiceAssistantState.Error, is VoiceAssistantState.WakeWordMonitoring -> {
                                 onRequestPermission()
-                                viewModel.startListening()
+                                viewModel.wakeUp("HUD Core Tap")
                             }
                             else -> {}
                         }
@@ -265,8 +270,8 @@ fun VoiceAssistantScreen(
                         is VoiceAssistantState.Listening -> s.partialTranscript
                         is VoiceAssistantState.Processing -> s.userTranscript
                         is VoiceAssistantState.Speaking -> s.aiResponse
-                        is VoiceAssistantState.WakeWordDetected -> "Wake word detected: ${s.wakePhrase}"
-                        is VoiceAssistantState.WakeWordMonitoring -> "Say \"Wake up, JARVIS\""
+                        is VoiceAssistantState.WakeWordDetected -> "Wake detected: ${s.wakePhrase}"
+                        is VoiceAssistantState.WakeWordMonitoring -> "Say \"Wake up, JARVIS\" or tap to wake"
                         else -> ""
                     }
 
@@ -352,7 +357,7 @@ fun VoiceAssistantScreen(
                                     }
                                     is VoiceAssistantState.Idle, is VoiceAssistantState.Paused, is VoiceAssistantState.Error, is VoiceAssistantState.WakeWordMonitoring -> {
                                         onRequestPermission()
-                                        viewModel.startListening()
+                                        viewModel.wakeUp("Button Tap")
                                     }
                                     else -> {}
                                 }
